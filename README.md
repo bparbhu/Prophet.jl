@@ -1,2 +1,2 @@
-# prophet.jl
-Julia version of the Facebook prophet tool
+# Prophet.jl
+Julia version of the Facebook prophet tool with an added Turing backend
