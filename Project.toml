@@ -1,6 +1,6 @@
 name = "Prophet"
 uuid = "8666106f-1174-47a8-aaa0-52902cc803bf"
-authors = ["brian "]
+authors = ["Brian Parbhu "]
 version = "0.1.0"
 
 [deps]
