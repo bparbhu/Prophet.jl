@@ -1,0 +1,10 @@
+name = "Prophet"
+uuid = "8666106f-1174-47a8-aaa0-52902cc803bf"
+authors = ["brian "]
+version = "0.1.0"
+
+[deps]
+Gadfly = "c91e804a-d5a3-530f-b6f0-dfbca275c004"
+PkgTemplates = "14b8a8f1-9102-5b29-a752-f990bacb7fe1"
+Stan = "682df890-35be-576f-97d0-3d8c8b33a550"
+Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
