@@ -2,6 +2,8 @@ using Turing
 using Distributions
 using Flux
 
+include("prophet.jl")
+
 # Define the Neural Prophet neural network structure
 struct NeuralProphetNN{T <: AbstractArray}
     W_seasonality::T
