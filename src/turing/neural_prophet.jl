@@ -3,6 +3,7 @@ using Distributions
 using Flux
 
 include("prophet.jl")
+using .prophet.jl
 
 # Define the Neural Prophet neural network structure
 struct NeuralProphetNN{T <: AbstractArray}
