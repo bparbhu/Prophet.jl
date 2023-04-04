@@ -1,6 +1,12 @@
 using DataFrames
 using Dates
 using Stan
+using OrderedCollections
+using Statistics
+using Gadfly
+using Plotly
+
+include("make_holidays.jl")
 
 
 mutable struct Prophet
@@ -289,19 +295,18 @@ function predict_seasonal_components(self, df::DataFrame)
     return seasonal_components
 end
 
-using DataFrames
-using Dates
+
 
 function validate_inputs(self)
     if !(self.growth in ["linear", "logistic", "flat"])
-        error('Parameter "growth" should be "linear", "logistic" or "flat".')
+        error("Parameter growth should be linear, logistic or flat.")
     end
     if !(isa(self.changepoint_range, Real) && 0 <= self.changepoint_range <= 1)
-        error(Parameter "changepoint_range" must be in [0, 1]')
+        error("Parameter changepoint_range must be in [0, 1]")
     end
     if !isnothing(self.holidays)
         if !(isa(self.holidays, DataFrame) && "ds" in names(self.holidays) && "holiday" in names(self.holidays))
-            error('holidays must be a DataFrame with "ds" and "holiday" columns.')
+            error("holidays must be a DataFrame with ds and holiday columns.")
         end
         self.holidays.ds = DateTime.(self.holidays.ds)
         if any(isna.(self.holidays.ds)) || any(isna.(self.holidays.holiday))
@@ -328,6 +333,7 @@ function validate_inputs(self)
         error("seasonality_mode must be additive or multiplicative")
     end
 end
+
 
 function validate_column_name(self, name; check_holidays=true, check_seasonalities=true, check_regressors=true)
     if "_delim_" in name
@@ -518,4 +524,963 @@ function make_seasonality_features(dates, period, series_order, prefix)
     columns = ["$(prefix)_delim_$(i)" for i in 1:size(features, 2)]
     return DataFrame(features, Symbol.(columns))
 end
+
+
+function construct_holiday_dataframe(
+    m, dates::Vector{Date}
+)
+    all_holidays = DataFrame()
+
+    if !isempty(m.holidays)
+        all_holidays = copy(m.holidays)
+    end
+
+    if m.country_holidays !== nothing
+        year_list = unique([x.year for x in dates])
+        country_holidays_df = make_holidays_df(
+            year_list, m.country_holidays
+        )
+        all_holidays = vcat(all_holidays, country_holidays_df)
+        all_holidays = unique(all_holidays)
+    end
+
+    # Drop future holidays not previously seen in training data
+    if m.train_holiday_names !== nothing
+        # Remove holiday names that didn't show up in fit
+        all_holidays = all_holidays[all_holidays[:, :holiday] .∈ Ref(m.train_holiday_names), :]
+
+        # Add holiday names in fit but not in predict with ds as missing
+        holidays_to_add = DataFrame(
+            holiday = m.train_holiday_names[.!(m.train_holiday_names .∈ Ref(all_holidays.holiday))]
+        )
+        all_holidays = vcat(all_holidays, holidays_to_add)
+        all_holidays = unique(all_holidays)
+    end
+
+    return all_holidays
+end
+
+
+function make_holiday_features(
+    m, dates::Vector{Date}, holidays::DataFrame
+)
+    # Holds columns of our future matrix.
+    expanded_holidays = DefaultDict(zeros(length(dates)))
+    prior_scales = Dict{String, Float64}()
+
+    for row in eachrow(holidays)
+        dt = row.ds
+        lw = get(row, :lower_window, 0)
+        uw = get(row, :upper_window, 0)
+        ps = get(row, :prior_scale, m.holidays_prior_scale)
+
+        if ps <= 0
+            error("Prior scale must be > 0")
+        end
+
+        if haskey(prior_scales, row.holiday) && prior_scales[row.holiday] != ps
+            error("Holiday $(row.holiday) does not have consistent prior scale specification.")
+        end
+
+        prior_scales[row.holiday] = ps
+
+        for offset in lw:uw
+            occurrence = dt + Day(offset)
+            loc = findfirst(isequal(occurrence), dates)
+            key = string(row.holiday, "_delim_", offset >= 0 ? "+" : "-", abs(offset))
+
+            if loc !== nothing
+                expanded_holidays[key][loc] = 1.0
+            else
+                expanded_holidays[key]  # Access key to generate value
+            end
+        end
+    end
+
+    holiday_features = DataFrame(expanded_holidays)
+    sort!(holiday_features, names(holiday_features))
+    prior_scale_list = [prior_scales[split(h, "_delim_")[1]] for h in names(holiday_features)]
+    holiday_names = keys(prior_scales)
+
+    # Store holiday names used in fit
+    if m.train_holiday_names === nothing
+        m.train_holiday_names = holiday_names
+    end
+
+    return holiday_features, prior_scale_list
+end
+
+
+function add_regressor(
+    m, name, 
+    prior_scale=nothing, 
+    standardize="auto", 
+    mode=nothing
+)
+    if !isnothing(m.history)
+        error("Regressors must be added prior to model fitting.")
+    end
+
+    validate_column_name(m, name, check_regressors=false)
+    if isnothing(prior_scale)
+        prior_scale = m.holidays_prior_scale
+    end
+    if isnothing(mode)
+        mode = m.seasonality_mode
+    end
+
+    if prior_scale <= 0
+        error("Prior scale must be > 0")
+    end
+
+    if mode ∉ ["additive", "multiplicative"]
+        error("mode must be 'additive' or 'multiplicative'")
+    end
+
+    m.extra_regressors[name] = Dict(
+        "prior_scale" => prior_scale,
+        "standardize" => standardize,
+        "mu" => 0.0,
+        "std" => 1.0,
+        "mode" => mode
+    )
+
+    return m
+end
+
+
+function add_seasonality(
+    m, name, period, fourier_order; 
+    prior_scale=nothing, mode=nothing, condition_name=nothing
+)
+    if !isnothing(m.history)
+        error("Seasonality must be added prior to model fitting.")
+    end
+
+    if name ∉ ["daily", "weekly", "yearly"]
+        # Allow overwriting built-in seasonalities
+        validate_column_name(m, name, check_seasonalities=false)
+    end
+
+    if isnothing(prior_scale)
+        ps = m.seasonality_prior_scale
+    else
+        ps = prior_scale
+    end
+
+    if ps <= 0
+        error("Prior scale must be > 0")
+    end
+
+    if fourier_order <= 0
+        error("Fourier Order must be > 0")
+    end
+
+    if isnothing(mode)
+        mode = m.seasonality_mode
+    end
+
+    if mode ∉ ["additive", "multiplicative"]
+        error("mode must be 'additive' or 'multiplicative'")
+    end
+
+    if !isnothing(condition_name)
+        validate_column_name(m, condition_name)
+    end
+
+    m.seasonalities[name] = Dict(
+        "period" => period,
+        "fourier_order" => fourier_order,
+        "prior_scale" => ps,
+        "mode" => mode,
+        "condition_name" => condition_name
+    )
+
+    return m
+end
+
+
+function add_country_holidays(m, country_name)
+    if !isnothing(m.history)
+        error("Country holidays must be added prior to model fitting.")
+    end
+
+    # Validate names.
+    for name in get_holiday_names(country_name)
+        # Allow merging with existing holidays
+        validate_column_name(m, name, check_holidays=false)
+    end
+
+    # Set the holidays.
+    if !isnothing(m.country_holidays)
+        @warn "Changing country holidays from $(m.country_holidays) to $(country_name)."
+    end
+    m.country_holidays = country_name
+
+    return m
+end
+
+
+function make_all_seasonality_features(m, df)
+    seasonal_features = []
+    prior_scales = []
+    modes = Dict("additive" => [], "multiplicative" => [])
+
+    # Seasonality features
+    for (name, props) in m.seasonalities
+        features = make_seasonality_features(m, df.ds, props["period"], props["fourier_order"], name)
+        if !isnothing(props["condition_name"])
+            features[.!df[:, props["condition_name"]], :] .= 0
+        end
+        push!(seasonal_features, features)
+        append!(prior_scales, fill(props["prior_scale"], size(features, 2)))
+        push!(modes[props["mode"]], name)
+    end
+
+    # Holiday features
+    holidays = construct_holiday_dataframe(m, df.ds)
+    if size(holidays, 1) > 0
+        features, holiday_priors, holiday_names = make_holiday_features(m, df.ds, holidays)
+        push!(seasonal_features, features)
+        append!(prior_scales, holiday_priors)
+        append!(modes[m.seasonality_mode], holiday_names)
+    end
+
+    # Additional regressors
+    for (name, props) in m.extra_regressors
+        push!(seasonal_features, DataFrame(df[:, name]))
+        push!(prior_scales, props["prior_scale"])
+        push!(modes[props["mode"]], name)
+    end
+
+    # Dummy to prevent empty X
+    if isempty(seasonal_features)
+        push!(seasonal_features, DataFrame(zeros = zeros(size(df, 1))))
+        push!(prior_scales, 1.)
+    end
+
+    seasonal_features = hcat(seasonal_features...)
+    component_cols, modes = regressor_column_matrix(m, seasonal_features, modes)
+    return seasonal_features, prior_scales, component_cols, modes
+end
+
+
+function regressor_column_matrix(m, seasonal_features, modes)
+    components = DataFrame(
+        col = 1:size(seasonal_features, 2),
+        component = [split(x, "_delim_")[1] for x in names(seasonal_features)]
+    )
+
+    # Add total for holidays
+    if !isnothing(m.train_holiday_names)
+        components = add_group_component(m, components, "holidays", unique(m.train_holiday_names))
+    end
+
+    # Add totals additive and multiplicative components, and regressors
+    for mode in ["additive", "multiplicative"]
+        components = add_group_component(m, components, mode * "_terms", modes[mode])
+
+        regressors_by_mode = [
+            r for (r, props) in m.extra_regressors
+            if props["mode"] == mode
+        ]
+        components = add_group_component(m, components, "extra_regressors_" * mode, regressors_by_mode)
+
+        # Add combination components to modes
+        push!(modes[mode], mode * "_terms")
+        push!(modes[mode], "extra_regressors_" * mode)
+    end
+
+    # After all of the additive/multiplicative groups have been added,
+    push!(modes[m.seasonality_mode], "holidays")
+
+    # Convert to a binary matrix
+    component_cols = unstack(components, :col, :component, :component, fill = 0)
+    component_cols = component_cols[sort(names(component_cols))]
+
+    # Add columns for additive and multiplicative terms, if missing
+    for name in ["additive_terms", "multiplicative_terms"]
+        if name ∉ names(component_cols)
+            component_cols[!, name] .= 0
+        end
+    end
+
+    # Remove the placeholder
+    select!(component_cols, Not(:zeros))
+
+    # Validation
+    if maximum(component_cols.additive_terms .+ component_cols.multiplicative_terms) > 1
+        error("A bug occurred in seasonal components.")
+    end
+
+    # Compare to the training, if set.
+    if !isnothing(m.train_component_cols)
+        component_cols = component_cols[:, names(m.train_component_cols)]
+        if !isequal(component_cols, m.train_component_cols)
+            error("A bug occurred in constructing regressors.")
+        end
+    end
+
+    return component_cols, modes
+end
+
+
+function add_group_component(m, components, name, group)
+    new_comp = components[in.(components.component, Ref(Set(group))), :]
+    group_cols = unique(new_comp.col)
+    if !isempty(group_cols)
+        new_comp = DataFrame(col = group_cols, component = name)
+        components = vcat(components, new_comp)
+    end
+    return components
+end
+
+
+function parse_seasonality_args(m, name, arg, auto_disable, default_order)
+    if arg == "auto"
+        fourier_order = 0
+        if haskey(m.seasonalities, name)
+            @info "Found custom seasonality named $name, disabling built-in $name seasonality."
+        elseif auto_disable
+            @info "Disabling $name seasonality. Run prophet with $name_seasonality=True to override this."
+        else
+            fourier_order = default_order
+        end
+    elseif arg == true
+        fourier_order = default_order
+    elseif arg == false
+        fourier_order = 0
+    else
+        fourier_order = Int(arg)
+    end
+    return fourier_order
+end
+
+
+function set_auto_seasonalities(m)
+    first = minimum(m.history[:, :ds])
+    last = maximum(m.history[:, :ds])
+    dt = diff(m.history[:, :ds])
+    min_dt = minimum(dt[dt .!= Dates.Day(0)])
+
+    # Yearly seasonality
+    yearly_disable = last - first < Dates.Day(730)
+    fourier_order = parse_seasonality_args(m, "yearly", m.yearly_seasonality, yearly_disable, 10)
+    if fourier_order > 0
+        m.seasonalities["yearly"] = Dict(
+            "period" => 365.25,
+            "fourier_order" => fourier_order,
+            "prior_scale" => m.seasonality_prior_scale,
+            "mode" => m.seasonality_mode,
+            "condition_name" => nothing
+        )
+    end
+
+    # Weekly seasonality
+    weekly_disable = (last - first < Dates.Day(7 * 2)) || (min_dt >= Dates.Day(7))
+    fourier_order = parse_seasonality_args(m, "weekly", m.weekly_seasonality, weekly_disable, 3)
+    if fourier_order > 0
+        m.seasonalities["weekly"] = Dict(
+            "period" => 7,
+            "fourier_order" => fourier_order,
+            "prior_scale" => m.seasonality_prior_scale,
+            "mode" => m.seasonality_mode,
+            "condition_name" => nothing
+        )
+    end
+
+    # Daily seasonality
+    daily_disable = (last - first < Dates.Day(2)) || (min_dt >= Dates.Day(1))
+    fourier_order = parse_seasonality_args(m, "daily", m.daily_seasonality, daily_disable, 4)
+    if fourier_order > 0
+        m.seasonalities["daily"] = Dict(
+            "period" => 1,
+            "fourier_order" => fourier_order,
+            "prior_scale" => m.seasonality_prior_scale,
+            "mode" => m.seasonality_mode,
+            "condition_name" => nothing
+        )
+    end
+end
+
+
+function linear_growth_init(df)
+    i0, i1 = argmin(df[:, :ds]), argmax(df[:, :ds])
+    T = df[i1, :t] - df[i0, :t]
+    k = (df[i1, :y_scaled] - df[i0, :y_scaled]) / T
+    m = df[i0, :y_scaled] - k * df[i0, :t]
+    return k, m
+end
+
+function logistic_growth_init(df)
+    i0, i1 = argmin(df[:, :ds]), argmax(df[:, :ds])
+    T = df[i1, :t] - df[i0, :t]
+
+    C0 = df[i0, :cap_scaled]
+    C1 = df[i1, :cap_scaled]
+    y0 = max(0.01 * C0, min(0.99 * C0, df[i0, :y_scaled]))
+    y1 = max(0.01 * C1, min(0.99 * C1, df[i1, :y_scaled]))
+
+    r0 = C0 / y0
+    r1 = C1 / y1
+
+    if abs(r0 - r1) <= 0.01
+        r0 = 1.05 * r0
+    end
+
+    L0 = log(r0 - 1)
+    L1 = log(r1 - 1)
+
+    m = L0 * T / (L0 - L1)
+    k = (L0 - L1) / T
+    return k, m
+end
+
+function flat_growth_init(df)
+    k = 0
+    m = mean(df[:, :y_scaled])
+    return k, m
+end
+
+
+function fit(prophet, df; kwargs...)
+    if !isnothing(prophet.history)
+        error("Prophet object can only be fit once. Instantiate a new object.")
+    end
+    if !("ds" in names(df)) || !("y" in names(df))
+        error("Dataframe must have columns ds and y with the dates and values respectively.")
+    end
+    history = df[.!ismissing.(df.y), :]
+    if nrow(history) < 2
+        error("Dataframe has less than 2 non-NaN rows.")
+    end
+    prophet.history_dates = sort(unique(df.ds))
+
+    history = setup_dataframe(prophet, history, initialize_scales=true)
+    prophet.history = history
+    set_auto_seasonalities(prophet)
+    seasonal_features, prior_scales, component_cols, modes = make_all_seasonality_features(prophet, history)
+    prophet.train_component_cols = component_cols
+    prophet.component_modes = modes
+    prophet.fit_kwargs = deepcopy(kwargs)
+
+    set_changepoints(prophet)
+
+    trend_indicator = Dict("linear" => 0, "logistic" => 1, "flat" => 2)
+
+    dat = Dict(
+        "T" => nrow(history),
+        "K" => size(seasonal_features, 2),
+        "S" => length(prophet.changepoints_t),
+        "y" => history.y_scaled,
+        "t" => history.t,
+        "t_change" => prophet.changepoints_t,
+        "X" => seasonal_features,
+        "sigmas" => prior_scales,
+        "tau" => prophet.changepoint_prior_scale,
+        "trend_indicator" => trend_indicator[prophet.growth],
+        "s_a" => component_cols["additive_terms"],
+        "s_m" => component_cols["multiplicative_terms"]
+    )
+
+    if prophet.growth == "linear"
+        dat["cap"] = zeros(nrow(history))
+        kinit = linear_growth_init(history)
+    elseif prophet.growth == "flat"
+        dat["cap"] = zeros(nrow(history))
+        kinit = flat_growth_init(history)
+    else
+        dat["cap"] = history.cap_scaled
+        kinit = logistic_growth_init(history)
+    end
+
+    stan_init = Dict(
+        "k" => kinit[1],
+        "m" => kinit[2],
+        "delta" => zeros(length(prophet.changepoints_t)),
+        "beta" => zeros(size(seasonal_features, 2)),
+        "sigma_obs" => 1.0
+    )
+
+    if minimum(history.y) == maximum(history.y) && (prophet.growth == "linear" || prophet.growth == "flat")
+        prophet.params = stan_init
+        prophet.params["sigma_obs"] = 1e-9
+        for par in keys(prophet.params)
+            prophet.params[par] = [prophet.params[par]]
+        end
+    elseif prophet.mcmc_samples > 0
+        # Replace with the appropriate Stan sampling function call
+        prophet.params = stan_sampling(stan_init, dat, prophet.mcmc_samples, kwargs...)
+    else
+        # Replace with the appropriate Stan optimization function call
+        prophet.params = stan_optimization(stan_init, dat, kwargs...)
+    end
+
+    prophet.stan_fit = prophet.stan_backend.stan_fit
+
+    if isempty(prophet.changepoints)
+        prophet.params["k"] = prophet.params["k"] .+ reshape(prophet.params["delta"], -1)
+        prophet.params["delta"] = reshape(zeros(size(prophet.params["delta"])), (-1, 1))
+    end
+
+    return prophet
+end
+
+
+function predict(prophet, df=nothing, vectorized=true)
+    if prophet.history === nothing
+        error("Model has not been fit.")
+    end
+
+    if df === nothing
+        df = deepcopy(prophet.history)
+    else
+        if nrow(df) == 0
+            error("Dataframe has no rows.")
+        end
+        df = setup_dataframe(prophet, deepcopy(df))
+    end
+
+    df[!, "trend"] = predict_trend(prophet, df)
+    seasonal_components = predict_seasonal_components(prophet, df)
+    if prophet.uncertainty_samples
+        intervals = predict_uncertainty(prophet, df, vectorized)
+    else
+        intervals = nothing
+    end
+
+    cols = ["ds", "trend"]
+    if "cap" in names(df)
+        push!(cols, "cap")
+    end
+    if prophet.logistic_floor
+        push!(cols, "floor")
+    end
+
+    df2 = hcat(df[:, cols], intervals, seasonal_components)
+    df2[!, "yhat"] = df2[!, "trend"] .* (1 .+ df2[!, "multiplicative_terms"]) .+ df2[!, "additive_terms"]
+    return df2
+end
+
+function predict_seasonal_components(prophet, df)
+    seasonal_features, _, component_cols, _ = make_all_seasonality_features(prophet, df)
+    if prophet.uncertainty_samples
+        lower_p = 100 * (1.0 - prophet.interval_width) / 2
+        upper_p = 100 * (1.0 + prophet.interval_width) / 2
+    end
+
+    X = Matrix(seasonal_features)
+    data = Dict{Symbol, Vector}()
+    for component in names(component_cols)
+        beta_c = prophet.params["beta"] .* component_cols[!, component]
+
+        comp = X * transpose(beta_c)
+        if component in prophet.component_modes["additive"]
+            comp .*= prophet.y_scale
+        end
+        data[Symbol(component)] = vec(mean(comp, dims=1))
+        if prophet.uncertainty_samples
+            data[Symbol(component * "_lower")] = vec(percentile(comp, lower_p, dims=1))
+            data[Symbol(component * "_upper")] = vec(percentile(comp, upper_p, dims=1))
+        end
+    end
+    return DataFrame(data)
+end
+
+
+function piecewise_linear(t, deltas, k, m, changepoint_ts)
+    deltas_t = (changepoint_ts .<= t) .* deltas'
+    k_t = sum(deltas_t, dims=2) .+ k
+    m_t = sum(deltas_t .* -changepoint_ts, dims=2) .+ m
+    return k_t .* t .+ m_t
+end
+
+function piecewise_logistic(t, cap, deltas, k, m, changepoint_ts)
+    k_cum = vcat(k, cumsum(deltas) .+ k)
+    gammas = zeros(length(changepoint_ts))
+    for i in 1:length(changepoint_ts)
+        t_s = changepoint_ts[i]
+        gammas[i] = (t_s - m - sum(gammas)) * (1 - k_cum[i] / k_cum[i + 1])
+    end
+    k_t = k * ones(size(t))
+    m_t = m * ones(size(t))
+    for s in 1:length(changepoint_ts)
+        t_s = changepoint_ts[s]
+        indx = t .>= t_s
+        k_t[indx] .+= deltas[s]
+        m_t[indx] .+= gammas[s]
+    end
+    return cap ./ (1 .+ exp.(-k_t .* (t .- m_t)))
+end
+
+function flat_trend(t, m)
+    m_t = m * ones(size(t))
+    return m_t
+end
+
+function predict_trend(prophet, df)
+    k = nanmean(prophet.params["k"])
+    m = nanmean(prophet.params["m"])
+    deltas = nanmean(prophet.params["delta"], dims=1)
+
+    t = df[!, "t"]
+    if prophet.growth == "linear"
+        trend = piecewise_linear(t, deltas, k, m, prophet.changepoints_t)
+    elseif prophet.growth == "logistic"
+        cap = df[!, "cap_scaled"]
+        trend = piecewise_logistic(t, cap, deltas, k, m, prophet.changepoints_t)
+    elseif prophet.growth == "flat"
+        trend = flat_trend(t, m)
+    end
+
+    return trend .* prophet.y_scale .+ df[!, "floor"]
+end
+
+
+using DataFrames
+using Random
+
+function sample_predictive_trend_vectorized(prophet, df, n_samples, iteration = 1)
+    deltas = prophet.params["delta"][iteration, :]
+    m = prophet.params["m"][iteration]
+    k = prophet.params["k"][iteration]
+
+    if prophet.growth == "linear"
+        expected = piecewise_linear(df[!, "t"], deltas, k, m, prophet.changepoints_t)
+    elseif prophet.growth == "logistic"
+        expected = piecewise_logistic(df[!, "t"], df[!, "cap_scaled"], deltas, k, m, prophet.changepoints_t)
+    elseif prophet.growth == "flat"
+        expected = flat_trend(df[!, "t"], m)
+    else
+        throw(NotImplementedError())
+    end
+
+    uncertainty = _sample_uncertainty(prophet, df, n_samples, iteration)
+    return (
+        (repeat(expected', n_samples, 1) .+ uncertainty) .* prophet.y_scale .+
+        repeat(df[!, "floor"]', n_samples, 1)
+    )
+end
+
+function sample_model_vectorized(prophet, df, seasonal_features, iteration, s_a, s_m, n_samples)
+    beta = prophet.params["beta"][iteration, :]
+    Xb_a = (seasonal_features * beta .* s_a') .* prophet.y_scale
+    Xb_m = seasonal_features * beta .* s_m'
+    
+    trends = sample_predictive_trend_vectorized(prophet, df, n_samples, iteration)
+    sigma = prophet.params["sigma_obs"][iteration]
+    noise_terms = randn(size(trends)) .* sigma .* prophet.y_scale
+
+    simulations = [
+        Dict(
+            "yhat" => trend .* (1 .+ Xb_m) .+ Xb_a .+ noise,
+            "trend" => trend
+        ) for (trend, noise) in zip(eachrow(trends), eachrow(noise_terms))
+    ]
+
+    return simulations
+end
+
+function sample_posterior_predictive(prophet, df, vectorized)
+    n_iterations = size(prophet.params["k"])[1]
+    samp_per_iter = max(1, Int(ceil(
+        prophet.uncertainty_samples / n_iterations
+    )))
+
+    seasonal_features, _, component_cols, _ = make_all_seasonality_features(prophet, df)
+    sim_values = Dict("yhat" => [], "trend" => [])
+
+    for i in 1:n_iterations
+        if vectorized
+            sims = sample_model_vectorized(
+                prophet, df, seasonal_features, i, component_cols[:, "additive_terms"],
+                component_cols[:, "multiplicative_terms"], samp_per_iter
+            )
+        else
+            sims = [
+                sample_model(
+                    prophet, df, seasonal_features, i, component_cols[:, "additive_terms"],
+                    component_cols[:, "multiplicative_terms"]
+                ) for _ in 1:samp_per_iter
+            ]
+        end
+        for key in keys(sim_values)
+            for sim in sims
+                push!(sim_values[key], sim[key])
+            end
+        end
+    end
+    for k in keys(sim_values)
+        sim_values[k] = hcat(sim_values[k]...)
+    end
+    return sim_values
+end
+
+
+using DataFrames
+using Statistics
+
+function predict_uncertainty(prophet, df, vectorized)
+    sim_values = sample_posterior_predictive(prophet, df, vectorized)
+
+    lower_p = 100 * (1.0 - prophet.interval_width) / 2
+    upper_p = 100 * (1.0 + prophet.interval_width) / 2
+
+    series = Dict()
+    for key in ["yhat", "trend"]
+        series["$(key)_lower"] = percentile(sim_values[key], lower_p, dims=2)
+        series["$(key)_upper"] = percentile(sim_values[key], upper_p, dims=2)
+    end
+
+    return DataFrame(series)
+end
+
+function sample_model(prophet, df, seasonal_features, iteration, s_a, s_m)
+    trend = sample_predictive_trend(prophet, df, iteration)
+
+    beta = prophet.params["beta"][iteration, :]
+    Xb_a = (seasonal_features * beta .* s_a') .* prophet.y_scale
+    Xb_m = seasonal_features * beta .* s_m'
+
+    sigma = prophet.params["sigma_obs"][iteration]
+    noise = randn(nrow(df)) .* sigma .* prophet.y_scale
+
+    return Dict("yhat" => trend .* (1 .+ Xb_m) .+ Xb_a .+ noise, "trend" => trend)
+end
+
+function sample_predictive_trend(prophet, df, iteration)
+    k = prophet.params["k"][iteration]
+    m = prophet.params["m"][iteration]
+    deltas = prophet.params["delta"][iteration, :]
+
+    t = df[!, "t"]
+    T = maximum(t)
+
+    if T > 1
+        S = length(prophet.changepoints_t)
+        n_changes = rand(Poisson(S * (T - 1)))
+    else
+        n_changes = 0
+    end
+
+    if n_changes > 0
+        changepoint_ts_new = 1 .+ rand(n_changes) .* (T - 1)
+        sort!(changepoint_ts_new)
+    else
+        changepoint_ts_new = Float64[]
+    end
+
+    lambda_ = mean(abs.(deltas)) + 1e-8
+    deltas_new = rand(Laplace(0, lambda_), n_changes)
+
+    changepoint_ts = vcat(prophet.changepoints_t, changepoint_ts_new)
+    deltas = vcat(deltas, deltas_new)
+
+    if prophet.growth == "linear"
+        trend = piecewise_linear(t, deltas, k, m, changepoint_ts)
+    elseif prophet.growth == "logistic"
+        cap = df[!, "cap_scaled"]
+        trend = piecewise_logistic(t, cap, deltas, k, m, changepoint_ts)
+    elseif prophet.growth == "flat"
+        trend = flat_trend(t, m)
+    end
+
+    return trend .* prophet.y_scale .+ df[!, "floor"]
+end
+
+function sample_predictive_trend_vectorized(prophet, df, n_samples, iteration=1)
+    deltas = prophet.params["delta"][iteration, :]
+    m = prophet.params["m"][iteration]
+    k = prophet.params["k"][iteration]
+    t = df[!, "t"]
+
+    if prophet.growth == "linear"
+        expected = piecewise_linear(t, deltas, k, m, prophet.changepoints_t)
+    elseif prophet.growth == "logistic"
+        expected = piecewise_logistic(t, df[!, "cap_scaled"], deltas, k, m, prophet.changepoints_t)
+    elseif prophet.growth == "flat"
+        expected = flat_trend(t, m)
+    else
+        error("NotImplementedError")
+    end
+
+    uncertainty = _sample_uncertainty(prophet, df, n_samples, iteration)
+
+    return (
+        (repeat(expected', n_samples, 1) .+ uncertainty) .* prophet.y_scale .+
+        repeat(df[!, "floor"]', n_samples, 1)
+    )
+end
+
+function _sample_uncertainty(prophet, df, n_samples, iteration=1)
+    tmax = maximum(df[!, "t"])
+
+    if tmax <= 1
+        uncertainties = zeros(n_samples, nrow(df))
+    else
+        future_df = df[df[!, "t"] .> 1, :]
+        n_length = nrow(future_df)
+
+        if n_length > 1
+            single_diff = mean(diff(future_df[!, "t"]))
+        else
+            single_diff = mean(diff(prophet.history[!, "t"]))
+        end
+
+        change_likelihood = length(prophet.changepoints_t) * single_diff
+        deltas = prophet.params["delta"][iteration, :]
+        m = prophet.params["m"][iteration]
+        k = prophet.params["k"][iteration]
+        mean_delta = mean(abs.(deltas)) + 1e-8
+
+        if prophet.growth == "linear"
+            mat = _make_trend_shift_matrix(prophet, mean_delta, change_likelihood, n_length, n_samples=n_samples)
+            uncertainties = cumsum(mat, dims=1)
+            uncertainties = cumsum(uncertainties, dims=1)
+            uncertainties .*= single_diff
+        elseif prophet.growth == "logistic"
+            mat = _make_trend_shift_matrix(prophet, mean_delta, change_likelihood, n_length, n_samples=n_samples)
+            uncertainties = _logistic_uncertainty(
+                prophet, mat, deltas, k, m, future_df[!, "cap_scaled"],
+                future_df[!, "t"], n_length, single_diff
+            )
+        elseif prophet.growth == "flat"
+            uncertainties = zeros(n_samples, n_length)
+        else
+            error("NotImplementedError")
+        end
+
+        if minimum(df[!, "t"]) <= 1
+            past_uncertainty = zeros(n_samples, sum(df[!, "t"] .<= 1))
+            uncertainties = hcat(past_uncertainty, uncertainties)
+        end
+    end
+
+    return uncertainties
+end
+
+
+function _make_trend_shift_matrix(mean_delta, likelihood, future_length, n_samples)
+    bool_slope_change = rand(n_samples, future_length) .< likelihood
+    shift_values = rand(Laplace(0, mean_delta), size(bool_slope_change))
+    mat = shift_values .* bool_slope_change
+    n_mat = hcat(zeros(size(mat, 1), 1), mat)[:, 1:end-1]
+    mat = (n_mat .+ mat) ./ 2
+    return mat
+end
+
+function _make_historical_mat_time(deltas, changepoints_t, t_time, n_row=1, single_diff=nothing)
+    if single_diff === nothing
+        single_diff = mean(diff(t_time))
+    end
+    prev_time = range(0, 1 + single_diff, step=single_diff)
+    idxs = [findfirst(>(changepoint), prev_time) for changepoint in changepoints_t]
+    prev_deltas = zeros(length(prev_time))
+    prev_deltas[idxs] .= deltas
+    prev_deltas = repeat(prev_deltas', n_row, 1)
+    return prev_deltas, prev_time
+end
+
+function _logistic_uncertainty(prophet, mat, deltas, k, m, cap, t_time, n_length, single_diff=nothing)
+    function ffill(arr)
+        mask = arr .== 0
+        idx = mask ?|> x -> x ? 0 : 1
+        idx = cummax(idx, dims=2)
+        return arr[:, idx]
+    end
+
+    historical_mat, historical_time = _make_historical_mat_time(deltas, prophet.changepoints_t, t_time, size(mat, 1), single_diff)
+    mat = hcat(historical_mat, mat)
+    full_t_time = vcat(historical_time, t_time)
+
+    k_cum = hcat(fill(k, (size(mat, 1), 1)), mat .|> x -> x ? cumsum(mat, dims=2) + k : 0)
+    k_cum_b = ffill(k_cum)
+    gammas = zeros(size(mat))
+    for i in 1:size(mat, 2)
+        x = full_t_time[i] - m - sum(gammas[:, 1:i-1], dims=2)
+        ks = 1 .- k_cum_b[:, i] ./ k_cum_b[:, i + 1]
+        gammas[:, i] = x .* ks
+    end
+
+    k_t = (cumsum(mat, dims=2) .+ k)[:, end - n_length + 1:end]
+    m_t = (cumsum(gammas, dims=2) .+ m)[:, end - n_length + 1:end]
+    sample_trends = cap ./ (1 .+ exp.(-k_t .* (t_time .- m_t)))
+    return sample_trends .- mean(sample_trends, dims=1)
+end
+
+
+function predictive_samples(prophet, df::DataFrame, vectorized::Bool=true)
+    df = prophet.setup_dataframe(copy(df))
+    return prophet.sample_posterior_predictive(df, vectorized)
+end
+
+function percentile(prophet, a; args...)
+    fn = any(isnan, a) ? nanquantile : quantile
+    return fn(a, args...; dims=1)
+end
+
+function make_future_dataframe(prophet, periods; freq=Day(1), include_history=true)
+    if prophet.history_dates === nothing
+        error("Model has not been fit.")
+    end
+
+    if freq === nothing
+        freq = DateFrequency.infer_freq(last(prophet.history_dates, 5))
+        if freq === nothing
+            error("Unable to infer `freq`")
+        end
+    end
+
+    last_date = maximum(prophet.history_dates)
+    dates = collect(DateRange(last_date, periods + 1, step=freq))
+    dates = dates[dates .> last_date]
+    dates = dates[1:periods]
+
+    if include_history
+        dates = vcat(prophet.history_dates, dates)
+    end
+
+    return DataFrame(ds=dates)
+end
+
+
+function plot_gadfly(prophet, fcst; uncertainty=true, plot_cap=true,
+                     xlabel="ds", ylabel="y", include_legend=false)
+    # Implement your plot_forecast_gadfly function here
+    return plot_forecast_gadfly(
+        prophet, fcst, uncertainty=uncertainty,
+        plot_cap=plot_cap, xlabel=xlabel, ylabel=ylabel,
+        include_legend=include_legend
+    )
+end
+
+function plot_components_gadfly(prophet, fcst; uncertainty=true, plot_cap=true,
+                                weekly_start=0, yearly_start=0)
+    # Implement your plot_forecast_components_gadfly function here
+    return plot_forecast_components_gadfly(
+        prophet, fcst, uncertainty=uncertainty, plot_cap=plot_cap,
+        weekly_start=weekly_start, yearly_start=yearly_start
+    )
+end
+
+
+function plot_plotly(prophet, fcst; uncertainty=true, plot_cap=true,
+                     xlabel="ds", ylabel="y", include_legend=false)
+    # Implement your plot_forecast_plotly function here
+    return plot_forecast_plotly(
+        prophet, fcst, uncertainty=uncertainty,
+        plot_cap=plot_cap, xlabel=xlabel, ylabel=ylabel,
+        include_legend=include_legend
+    )
+end
+
+function plot_components_plotly(prophet, fcst; uncertainty=true, plot_cap=true,
+                                weekly_start=0, yearly_start=0)
+    # Implement your plot_forecast_components_plotly function here
+    return plot_forecast_components_plotly(
+        prophet, fcst, uncertainty=uncertainty, plot_cap=plot_cap,
+        weekly_start=weekly_start, yearly_start=yearly_start
+    )
+end
+
 
