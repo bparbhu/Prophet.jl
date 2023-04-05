@@ -4,7 +4,6 @@ using Dates
 using Plotly
 using Printf
 using Statistics
-using Prophet
 
 function plot_forecast(
     m, fcst; uncertainty=true, plot_cap=true, xlabel="ds", ylabel="y", include_legend=false
@@ -213,8 +212,6 @@ function plot_forecast_component(m, fcst, name;
 end
 
 
-using DataFrames
-
 function seasonality_plot_df(m, ds)
     df_dict = Dict("ds" => ds, "cap" => 1.0, "floor" => 0.0)
 
@@ -234,8 +231,6 @@ function seasonality_plot_df(m, ds)
     return df
 end
 
-
-using Gadfly, DataFrames, Dates
 
 function plot_weekly_gadfly(m; uncertainty=true, weekly_start=0, name="weekly")
     # Compute weekly seasonality for a Sun-Sat sequence of dates.
@@ -412,8 +407,6 @@ function plot_seasonality_gadfly(m, name; uncertainty=true)
 end
 
 
-using Plotly, DataFrames, Dates
-
 function plot_seasonality_plotly(m, name; uncertainty=true)
     # Compute seasonality from Jan 1 through a single period.
     start = DateTime(2017, 1, 1)
@@ -512,4 +505,29 @@ function plot_cross_validation_metric_gadfly(
         Guide.xlabel("Horizon"),
         Guide.ylabel(metric)
     )
+end
+
+function plot_cross_validation_metric_plotly(
+        df_cv, metric, rolling_window=0.1;
+        color="blue", point_color="gray"
+    )
+    df_none = performance_metrics(df_cv, metrics=[metric], rolling_window=-1)
+    df_h = performance_metrics(df_cv, metrics=[metric], rolling_window=rolling_window)
+
+    trace_points = scatter(
+        x=df_none.horizon, y=df_none[:, Symbol(metric)],
+        mode="markers", marker=attr(color=point_color, opacity=0.1)
+    )
+
+    trace_line = scatter(
+        x=df_h.horizon, y=df_h[:, Symbol(metric)],
+        mode="lines", line=attr(color=color)
+    )
+
+    layout = Layout(
+        xaxis=attr(title="Horizon"),
+        yaxis=attr(title=metric)
+    )
+
+    plot([trace_points, trace_line], layout)
 end
