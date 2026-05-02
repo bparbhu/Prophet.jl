@@ -24,6 +24,24 @@ jobs:
       - uses: julia-actions/setup-julia@v2
         with:
           version: ${{ matrix.version }}
+      - name: Cache CmdStan 2.37.0
+        id: cache-cmdstan
+        uses: actions/cache@v4
+        with:
+          path: ~/cmdstan-2.37.0
+          key: cmdstan-2.37.0-${{ runner.os }}
+      - name: Install CmdStan 2.37.0
+        if: steps.cache-cmdstan.outputs.cache-hit != 'true'
+        run: |
+          curl -L https://github.com/stan-dev/cmdstan/releases/download/v2.37.0/cmdstan-2.37.0.tar.gz -o cmdstan-2.37.0.tar.gz
+          tar -xzf cmdstan-2.37.0.tar.gz -C "$HOME"
+          make -C "$HOME/cmdstan-2.37.0" build -j2
+      - name: Verify CmdStan 2.37.0
+        run: |
+          "$HOME/cmdstan-2.37.0/bin/stanc" --version
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
+        env:
+          CMDSTAN: /home/runner/cmdstan-2.37.0
+          JULIA_CMDSTAN_HOME: /home/runner/cmdstan-2.37.0

@@ -5,6 +5,7 @@ A Julia proof of concept for Prophet-style forecasting components.
 This branch keeps the package runtime focused on Julia code:
 
 - Stan-equivalent trend and likelihood utilities in `src/turing/prophet-turing.jl`.
+- `Stan.jl` dependency and bundled Stan model access through `stan_model_file()`.
 - A Turing model that mirrors the bundled Stan model's priors and likelihood.
 - A Flux/Turing variant that keeps the Prophet terms equivalent and adds a Bayesian neural residual.
 - Embedded holidays loaded from `data/generated_holidays.csv`, with no runtime holiday-package dependency.
@@ -110,4 +111,6 @@ plot_forecast_component(model, forecast, "trend"; backend=:makie)
 julia --project=. -e 'using Pkg; Pkg.test()'
 ```
 
-GitHub Actions tests Julia `1.10` and the latest stable Julia release.
+GitHub Actions tests Julia `1.10` and the latest stable Julia release. CI also
+downloads and builds CmdStan `2.37.0`, sets both `CMDSTAN` and
+`JULIA_CMDSTAN_HOME`, and verifies the `stanc` version during the test run.

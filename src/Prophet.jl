@@ -1,6 +1,7 @@
 module Prophet
 
 include("make_holidays.jl")
+include("stan_backend.jl")
 include("turing/prophet-turing.jl")
 include("turing/neural_prophet.jl")
 include("plot.jl")
@@ -42,6 +43,12 @@ export ProphetModel,
        get_holiday_names,
        make_holidays_df,
        supported_holiday_countries,
+       stan_model_file,
+       stan_backend_module,
+       cmdstan_home,
+       cmdstan_stanc,
+       cmdstan_version,
+       REQUIRED_CMDSTAN_VERSION,
        get_changepoint_matrix,
        logistic_gamma,
        logistic_trend,
