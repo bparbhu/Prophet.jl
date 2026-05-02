@@ -16,30 +16,47 @@ function _logistic_floor(m)
     hasproperty(m, :logistic_floor) ? getproperty(m, :logistic_floor) : false
 end
 
+function _makie_x(ds)
+    return Dates.value.(Date.(ds) .- Date(1970, 1, 1))
+end
+
+function _makie_axis!(ax, ds)
+    ticks = _makie_x(ds)
+    isempty(ticks) && return ax
+    step = max(1, cld(length(ticks), 6))
+    selected = ticks[1:step:end]
+    labels = Dates.format.(Date(1970, 1, 1) .+ Day.(selected), dateformat"yyyy-mm-dd")
+    ax.xticks = (selected, labels)
+    return ax
+end
+
 function _plot_forecast_makie(
     m, fcst; uncertainty=true, plot_cap=true, xlabel="ds", ylabel="y", include_legend=false
 )
     history = _history_frame(m)
     fig = CairoMakie.Figure(size=(900, 520))
     ax = CairoMakie.Axis(fig[1, 1], xlabel=xlabel, ylabel=ylabel)
+    hx = _makie_x(history.ds)
+    fx = _makie_x(fcst.ds)
 
-    CairoMakie.scatter!(ax, history.ds, history.y; color=:black, markersize=7, label="Observed")
-    CairoMakie.lines!(ax, fcst.ds, fcst.yhat; color=:steelblue, linewidth=2, label="Forecast")
+    CairoMakie.scatter!(ax, hx, history.y; color=:black, markersize=7, label="Observed")
+    CairoMakie.lines!(ax, fx, fcst.yhat; color=:steelblue, linewidth=2, label="Forecast")
 
     if uncertainty && _uncertainty_samples(m) > 0 &&
             all(x -> x in names(fcst), ["yhat_lower", "yhat_upper"])
         CairoMakie.band!(
-            ax, fcst.ds, fcst.yhat_lower, fcst.yhat_upper;
+            ax, fx, fcst.yhat_lower, fcst.yhat_upper;
             color=(:steelblue, 0.18), label="Interval"
         )
     end
 
     if plot_cap && "cap" in names(fcst)
-        CairoMakie.lines!(ax, fcst.ds, fcst.cap; color=:black, linestyle=:dash, label="Cap")
+        CairoMakie.lines!(ax, fx, fcst.cap; color=:black, linestyle=:dash, label="Cap")
     end
     if plot_cap && _logistic_floor(m) && "floor" in names(fcst)
-        CairoMakie.lines!(ax, fcst.ds, fcst.floor; color=:black, linestyle=:dash, label="Floor")
+        CairoMakie.lines!(ax, fx, fcst.floor; color=:black, linestyle=:dash, label="Floor")
     end
+    _makie_axis!(ax, vcat(Date.(history.ds), Date.(fcst.ds)))
     include_legend && CairoMakie.axislegend(ax)
     return fig
 end
@@ -59,7 +76,7 @@ function _plot_forecast_gadfly(
             layers,
             Gadfly.layer(
                 fcst, x=:ds, ymin=:yhat_lower, ymax=:yhat_upper,
-                Gadfly.Geom.ribbon, Gadfly.Theme(default_color="steelblue", alpha=[0.18])
+                Gadfly.Geom.ribbon, Gadfly.Theme(default_color="steelblue", alphas=[0.18])
             ),
         )
     end
@@ -98,16 +115,18 @@ function _plot_forecast_component_makie(m, fcst, name; uncertainty=true, plot_ca
     col = Symbol(name)
     fig = CairoMakie.Figure(size=(900, 420))
     ax = CairoMakie.Axis(fig[1, 1], xlabel="ds", ylabel=String(name))
-    CairoMakie.lines!(ax, fcst.ds, fcst[!, col]; color=:steelblue, linewidth=2)
+    fx = _makie_x(fcst.ds)
+    CairoMakie.lines!(ax, fx, fcst[!, col]; color=:steelblue, linewidth=2)
 
     lower = Symbol(string(name, "_lower"))
     upper = Symbol(string(name, "_upper"))
     if uncertainty && _uncertainty_samples(m) > 0 && all(x -> String(x) in names(fcst), [lower, upper])
-        CairoMakie.band!(ax, fcst.ds, fcst[!, lower], fcst[!, upper]; color=(:steelblue, 0.18))
+        CairoMakie.band!(ax, fx, fcst[!, lower], fcst[!, upper]; color=(:steelblue, 0.18))
     end
     if plot_cap && "cap" in names(fcst)
-        CairoMakie.lines!(ax, fcst.ds, fcst.cap; color=:black, linestyle=:dash)
+        CairoMakie.lines!(ax, fx, fcst.cap; color=:black, linestyle=:dash)
     end
+    _makie_axis!(ax, fcst.ds)
     return fig
 end
 
@@ -123,7 +142,7 @@ function _plot_forecast_component_gadfly(m, fcst, name; uncertainty=true, plot_c
             layers,
             Gadfly.layer(
                 fcst, x=:ds, ymin=lower, ymax=upper,
-                Gadfly.Geom.ribbon, Gadfly.Theme(default_color="steelblue", alpha=[0.18])
+                Gadfly.Geom.ribbon, Gadfly.Theme(default_color="steelblue", alphas=[0.18])
             ),
         )
     end

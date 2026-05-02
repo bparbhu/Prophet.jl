@@ -140,14 +140,14 @@ function _horizon(df::DataFrame)
 end
 
 function _metric_frame(df::DataFrame, metric::Symbol, values)
-    return DataFrame(horizon=_horizon(df), metric => Float64.(values))
+    return DataFrame(:horizon => _horizon(df), metric => Float64.(values))
 end
 
 mse(df::DataFrame) = _metric_frame(df, :mse, (df.y .- df.yhat) .^ 2)
 rmse(df::DataFrame) = _metric_frame(df, :rmse, sqrt.((df.y .- df.yhat) .^ 2))
 mae(df::DataFrame) = _metric_frame(df, :mae, abs.(df.y .- df.yhat))
 mape(df::DataFrame) = _metric_frame(df, :mape, abs.((df.y .- df.yhat) ./ df.y))
-mdape(df::DataFrame) = DataFrame(horizon=[maximum(_horizon(df))], mdape=[median(abs.((df.y .- df.yhat) ./ df.y))])
+mdape(df::DataFrame) = DataFrame(:horizon => [maximum(_horizon(df))], :mdape => [median(abs.((df.y .- df.yhat) ./ df.y))])
 smape(df::DataFrame) = _metric_frame(df, :smape, abs.(df.y .- df.yhat) ./ ((abs.(df.y) .+ abs.(df.yhat)) ./ 2))
 
 function coverage(df::DataFrame)

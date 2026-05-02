@@ -5,7 +5,7 @@ using DataFrames
 using Statistics
 using Prophet
 
-function example_daily(n::Int=120)
+function backend_comparison_daily(n::Int=120)
     ds = Date(2020, 1, 1):Day(1):(Date(2020, 1, 1) + Day(n - 1))
     t = collect(0:(n - 1))
     y = 10 .+ 0.18 .* t .+ 1.5 .* sin.(2pi .* t ./ 7) .+ 0.5 .* cos.(2pi .* t ./ 30)
@@ -25,7 +25,7 @@ function fit_backend(df::DataFrame, backend::Symbol; periods::Int=30)
 end
 
 function compare_backends(; periods::Int=30)
-    df = example_daily()
+    df = backend_comparison_daily()
     backends = (:stan, :turing, :neural_turing)
     fitted = Dict{Symbol,Any}()
     forecasts = DataFrame[]
