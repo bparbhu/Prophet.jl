@@ -4,7 +4,7 @@
 
     @test Set(keys(fitted)) == Set(BACKENDS)
     @test nrow(summary) == length(BACKENDS)
-    @test all(["backend", "final_yhat", "mean_yhat", "mean_abs_diff_vs_stan"] .in Ref(names(summary)))
+    @test all(in.(["backend", "final_yhat", "mean_yhat", "mean_abs_diff_vs_stan"], Ref(names(summary))))
     @test Set(summary.backend) == Set(String.(BACKENDS))
     @test nrow(forecasts) == length(BACKENDS) * (120 + 5)
 end

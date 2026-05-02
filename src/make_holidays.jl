@@ -20,7 +20,8 @@ end
 Return the country codes available in the embedded generated holiday table.
 """
 function supported_holiday_countries()
-    return sort!(unique(String.(dropmissing(_holiday_table().country))))
+    countries = collect(skipmissing(_holiday_table().country))
+    return sort!(unique(String.(countries)))
 end
 
 """
