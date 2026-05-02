@@ -88,7 +88,7 @@ end
 model_to_json(model) = JSON.json(model_to_dict(model))
 
 function model_from_dict(model_dict)
-    model = Prophet.Prophet()  # Make sure to use the correct constructor for your Julia implementation
+    model = ProphetModel()
     for attribute in SIMPLE_ATTRIBUTES
         setfield!(model, attribute, model_dict[attribute])
     end

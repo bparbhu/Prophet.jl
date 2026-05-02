@@ -13,13 +13,13 @@ This branch keeps the package runtime focused on Julia code:
 
 ## Python-Style Usage
 
-Julia's package module is also named `Prophet`, so the closest equivalent to
-Python's `m = Prophet()` is:
+Julia's package module is also named `Prophet`, so the constructor is
+`ProphetModel`:
 
 ```julia
 import Prophet
 
-m = Prophet.Prophet()
+m = Prophet.ProphetModel()
 Prophet.add_country_holidays(m; country_name="US")
 Prophet.add_seasonality(m; name="monthly", period=30.5, fourier_order=3)
 Prophet.fit(m, df)  # df is a DataFrame with ds and y columns
@@ -32,9 +32,9 @@ components = Prophet.plot_components(m, forecast; backend=:gadfly)
 Select the modeling backend at construction time:
 
 ```julia
-m_stan = Prophet.Prophet(model_backend=:stan)
-m_turing = Prophet.Prophet(model_backend=:turing)
-m_neural = Prophet.Prophet(model_backend=:neural_turing) # also accepts :flux_turing
+m_stan = Prophet.ProphetModel(model_backend=:stan)
+m_turing = Prophet.ProphetModel(model_backend=:turing)
+m_neural = Prophet.ProphetModel(model_backend=:neural_turing) # also accepts :flux_turing
 ```
 
 The POC currently carries the backend choice through the public API while the

@@ -95,8 +95,6 @@ function ProphetModel(;
     )
 end
 
-const Prophet = ProphetModel
-
 function _normalize_model_backend(model_backend, stan_backend)
     backend = Symbol(model_backend)
     if stan_backend !== nothing
