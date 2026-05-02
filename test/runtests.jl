@@ -19,4 +19,5 @@ include("test_helpers.jl")
     include("neural_turing_tests.jl")
     include("diagnostics_tests.jl")
     include("plot_tests.jl")
+    include("examples_tests.jl")
 end

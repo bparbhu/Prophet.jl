@@ -85,6 +85,21 @@ df_cv = Prophet.cross_validation(
 
 `parallel=:threads` is also available for a simple single-process threaded run.
 
+## Examples
+
+Run the backend comparison example from the repo root:
+
+```bash
+julia --project=. examples/backend_comparison.jl
+```
+
+It fits the same synthetic daily series with `:stan`, `:turing`, and
+`:neural_turing`, then prints a small forecast summary and side-by-side backend
+preview. In the current POC the public fit/predict facade is deterministic, so
+the example is primarily an API comparison scaffold; as the backend-specific
+fit paths mature, this script becomes the place to inspect behavioral
+differences.
+
 ## Holidays
 
 Python Prophet depends on the Python `holidays` package. For this POC, the package reads the generated CSV directly:
