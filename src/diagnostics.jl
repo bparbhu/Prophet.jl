@@ -61,6 +61,7 @@ function _copy_for_cross_validation(m::ProphetModel)
     m2 = ProphetModel(
         growth=m.growth,
         model_backend=m.model_backend,
+        changepoints=m.changepoints,
         n_changepoints=m.n_changepoints,
         changepoint_range=m.changepoint_range,
         yearly_seasonality=m.yearly_seasonality,
@@ -76,7 +77,10 @@ function _copy_for_cross_validation(m::ProphetModel)
         mcmc_samples=m.mcmc_samples,
         interval_width=m.interval_width,
         uncertainty_samples=m.uncertainty_samples,
+        scaling=m.scaling,
     )
+    m2.specified_changepoints = m.specified_changepoints
+    m2.fit_kwargs = deepcopy(m.fit_kwargs)
     m2.seasonalities = deepcopy(m.seasonalities)
     m2.extra_regressors = deepcopy(m.extra_regressors)
     return m2
@@ -88,7 +92,8 @@ function single_cutoff_forecast(df::DataFrame, model::ProphetModel, cutoff::Date
     nrow(history_c) >= 2 || error("Less than two datapoints before cutoff.")
 
     m = _copy_for_cross_validation(model)
-    fit(m, history_c)
+    fit_kwargs = (; (Symbol(k) => v for (k, v) in model.fit_kwargs)...)
+    fit(m, history_c; fit_kwargs...)
 
     index_predicted = (Date.(df.ds) .> cutoff) .& (Date.(df.ds) .<= cutoff + h)
     future = df[index_predicted, setdiff(Symbol.(names(df)), [:y, :y_scaled, :t, :cap_scaled])]

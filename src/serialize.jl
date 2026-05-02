@@ -76,6 +76,8 @@ function model_to_dict(m::ProphetModel)
     return Dict{String,Any}(
         "__prophet_jl_version" => PROPHET_JL_SERIALIZATION_VERSION,
         "growth" => m.growth,
+        "changepoints" => _serialize_value(m.changepoints),
+        "specified_changepoints" => m.specified_changepoints,
         "model_backend" => String(m.model_backend),
         "n_changepoints" => m.n_changepoints,
         "changepoint_range" => m.changepoint_range,
@@ -92,6 +94,7 @@ function model_to_dict(m::ProphetModel)
         "mcmc_samples" => m.mcmc_samples,
         "interval_width" => m.interval_width,
         "uncertainty_samples" => m.uncertainty_samples,
+        "scaling" => m.scaling,
         "logistic_floor" => m.logistic_floor,
         "history" => _serialize_value(m.history),
         "history_dates" => _serialize_value(m.history_dates),
@@ -102,9 +105,12 @@ function model_to_dict(m::ProphetModel)
         "params" => _serialize_value(m.params),
         "fit_backend" => isnothing(m.fit_backend) ? nothing : String(m.fit_backend),
         "fit_engine" => isnothing(m.fit_engine) ? nothing : String(m.fit_engine),
+        "fit_kwargs" => _serialize_value(m.fit_kwargs),
         "backend_data" => _serialize_value(m.backend_data),
         "seasonalities" => _serialize_value(m.seasonalities),
         "extra_regressors" => _serialize_value(m.extra_regressors),
+        "train_component_cols" => _serialize_value(m.train_component_cols),
+        "component_modes" => _serialize_value(m.component_modes),
         "train_holiday_names" => _serialize_value(m.train_holiday_names),
         "changepoints_t" => _serialize_value(m.changepoints_t),
     )
@@ -116,6 +122,7 @@ function model_from_dict(raw::Dict)
     d = Dict(String(k) => _deserialize_value(v) for (k, v) in raw)
     m = ProphetModel(
         growth=d["growth"],
+        changepoints=get(d, "changepoints", nothing),
         model_backend=Symbol(d["model_backend"]),
         n_changepoints=Int(d["n_changepoints"]),
         changepoint_range=Float64(d["changepoint_range"]),
@@ -132,7 +139,9 @@ function model_from_dict(raw::Dict)
         mcmc_samples=Int(d["mcmc_samples"]),
         interval_width=Float64(d["interval_width"]),
         uncertainty_samples=Int(d["uncertainty_samples"]),
+        scaling=get(d, "scaling", "absmax"),
     )
+    m.specified_changepoints = Bool(get(d, "specified_changepoints", false))
     m.logistic_floor = Bool(d["logistic_floor"])
     m.history = d["history"]
     m.history_dates = isnothing(d["history_dates"]) ? nothing : Date.(d["history_dates"])
@@ -143,6 +152,7 @@ function model_from_dict(raw::Dict)
     m.params = Dict{String,Any}(String(k) => v for (k, v) in d["params"])
     m.fit_backend = isnothing(d["fit_backend"]) ? nothing : Symbol(d["fit_backend"])
     m.fit_engine = isnothing(d["fit_engine"]) ? nothing : Symbol(d["fit_engine"])
+    m.fit_kwargs = Dict{String,Any}(String(k) => v for (k, v) in get(d, "fit_kwargs", Dict()))
     m.backend_data = Dict{String,Any}(String(k) => v for (k, v) in d["backend_data"])
     m.seasonalities = Dict{String,Dict{String,Any}}(
         String(k) => Dict{String,Any}(String(kk) => vv for (kk, vv) in v) for (k, v) in d["seasonalities"]
@@ -150,6 +160,10 @@ function model_from_dict(raw::Dict)
     m.extra_regressors = Dict{String,Dict{String,Any}}(
         String(k) => Dict{String,Any}(String(kk) => vv for (kk, vv) in v) for (k, v) in d["extra_regressors"]
     )
+    m.train_component_cols = get(d, "train_component_cols", nothing)
+    raw_component_modes = get(d, "component_modes", nothing)
+    m.component_modes = isnothing(raw_component_modes) ? nothing :
+        Dict{String,Vector{String}}(String(k) => String.(v) for (k, v) in raw_component_modes)
     m.train_holiday_names = isnothing(d["train_holiday_names"]) ? nothing : String.(d["train_holiday_names"])
     m.changepoints_t = isnothing(d["changepoints_t"]) ? nothing : Float64.(d["changepoints_t"])
     return m

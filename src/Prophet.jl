@@ -6,7 +6,7 @@ include("stan_backend.jl")
 include("turing/prophet-turing.jl")
 include("turing/neural_prophet.jl")
 include("plot.jl")
-include("forecaster_api.jl")
+include("forecaster.jl")
 include("diagnostics.jl")
 include("serialize.jl")
 include("utilities.jl")
@@ -23,6 +23,16 @@ export ProphetModel,
        model_backend,
        fit_backend,
        fit_engine,
+       validate_column_name,
+       validate_inputs,
+       preprocess,
+       calculate_initial_params,
+       set_changepoints,
+       set_changepoints!,
+       make_all_seasonality_features,
+       regressor_column_matrix,
+       add_group_component,
+       parse_seasonality_args,
        TrendIndicator,
        LINEAR,
        LOGISTIC,
@@ -37,6 +47,16 @@ export ProphetModel,
        stan_to_dict,
        fit,
        predict,
+       predict_trend,
+       predict_seasonal_components,
+       predict_uncertainty,
+       predictive_samples,
+       sample_posterior_predictive,
+       sample_model,
+       sample_model_vectorized,
+       sample_predictive_trend,
+       sample_predictive_trend_vectorized,
+       percentile,
        make_future_dataframe,
        setup_dataframe,
        initialize_scales!,
