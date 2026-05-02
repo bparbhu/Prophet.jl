@@ -29,6 +29,19 @@ fig = Prophet.plot(m, forecast; backend=:makie)
 components = Prophet.plot_components(m, forecast; backend=:gadfly)
 ```
 
+Select the modeling backend at construction time:
+
+```julia
+m_stan = Prophet.Prophet(model_backend=:stan)
+m_turing = Prophet.Prophet(model_backend=:turing)
+m_neural = Prophet.Prophet(model_backend=:neural_turing) # also accepts :flux_turing
+```
+
+The POC currently carries the backend choice through the public API while the
+deterministic fit/predict facade remains lightweight for CI. The exported
+`prophet` and `neural_prophet` Turing models are tested directly for their model
+math.
+
 If you prefer exported names:
 
 ```julia

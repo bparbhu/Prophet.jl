@@ -60,6 +60,7 @@ end
 function _copy_for_cross_validation(m::ProphetModel)
     m2 = ProphetModel(
         growth=m.growth,
+        model_backend=m.model_backend,
         n_changepoints=m.n_changepoints,
         changepoint_range=m.changepoint_range,
         yearly_seasonality=m.yearly_seasonality,
@@ -94,6 +95,7 @@ function single_cutoff_forecast(df::DataFrame, model::ProphetModel, cutoff::Date
     fcst = predict(m, future)
     fcst.y = Float64.(df[index_predicted, :y])
     fcst.cutoff = fill(cutoff, nrow(fcst))
+    fcst.model_backend = fill(String(model_backend(m)), nrow(fcst))
     return fcst
 end
 

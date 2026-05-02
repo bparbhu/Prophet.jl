@@ -5,6 +5,7 @@ using Statistics
 
 mutable struct ProphetModel
     growth::String
+    model_backend::Symbol
     n_changepoints::Int
     changepoint_range::Float64
     yearly_seasonality::Union{String,Bool,Int}
@@ -35,6 +36,8 @@ end
 
 function ProphetModel(;
     growth::AbstractString="linear",
+    model_backend::Union{Symbol,AbstractString}=:stan,
+    stan_backend=nothing,
     n_changepoints::Integer=25,
     changepoint_range::Real=0.8,
     yearly_seasonality::Union{String,Bool,Integer}="auto",
@@ -53,6 +56,7 @@ function ProphetModel(;
 )
     growth in ("linear", "logistic", "flat") ||
         error("Parameter \"growth\" should be \"linear\", \"logistic\" or \"flat\".")
+    resolved_backend = _normalize_model_backend(model_backend, stan_backend)
     0 <= changepoint_range <= 1 || error("changepoint_range must be in [0, 1].")
     seasonality_mode in ("additive", "multiplicative") ||
         error("seasonality_mode must be \"additive\" or \"multiplicative\".")
@@ -61,6 +65,7 @@ function ProphetModel(;
         error("holidays_mode must be \"additive\" or \"multiplicative\".")
     return ProphetModel(
         String(growth),
+        resolved_backend,
         Int(n_changepoints),
         Float64(changepoint_range),
         yearly_seasonality,
@@ -91,6 +96,29 @@ function ProphetModel(;
 end
 
 const Prophet = ProphetModel
+
+function _normalize_model_backend(model_backend, stan_backend)
+    backend = Symbol(model_backend)
+    if stan_backend !== nothing
+        backend = :stan
+    end
+    backend in (:stan, :turing, :neural_turing, :flux_turing) ||
+        error("model_backend must be :stan, :turing, or :neural_turing.")
+    backend == :flux_turing && return :neural_turing
+    return backend
+end
+
+function set_model_backend!(m::ProphetModel, backend)
+    m.history !== nothing && error("Model backend must be selected before fitting.")
+    m.model_backend = _normalize_model_backend(backend, nothing)
+    return m
+end
+
+set_model_backend(m::ProphetModel, backend) = set_model_backend!(m, backend)
+
+function model_backend(m::ProphetModel)
+    return m.model_backend
+end
 
 function add_country_holidays!(m::ProphetModel; country_name::AbstractString)
     m.history !== nothing && error("Country holidays must be added prior to model fitting.")
@@ -219,6 +247,9 @@ function fit(m::ProphetModel, df::DataFrame)
     history = _coerce_history(df)
     nrow(history) >= 2 || error("DataFrame must contain at least two observations.")
     history = setup_dataframe(m, history; initialize_scales=true)
+    if m.model_backend in (:turing, :neural_turing)
+        @debug "Using deterministic POC fit while carrying $(m.model_backend) backend selection."
+    end
     m.history_dates = sort(unique(history.ds))
     t = history.t
     if m.growth == "flat"

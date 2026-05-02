@@ -13,9 +13,12 @@ function example_daily(n::Int=120)
     return DataFrame(ds=collect(ds), y=Float64.(y))
 end
 
+const BACKENDS = (:stan, :turing, :neural_turing)
+
 @testset "Prophet-style constructor and validation" begin
     m = Prophet.Prophet()
     @test m.growth == "linear"
+    @test model_backend(m) == :stan
     @test m.n_changepoints == 25
     @test m.seasonality_mode == "additive"
     @test m.holidays_mode == "additive"
@@ -24,6 +27,14 @@ end
     @test_throws ErrorException Prophet.Prophet(changepoint_range=-0.1)
     @test_throws ErrorException Prophet.Prophet(changepoint_range=2.0)
     @test_throws ErrorException Prophet.Prophet(seasonality_mode="bad")
+    @test_throws ErrorException Prophet.Prophet(model_backend=:bad)
+
+    turing_model = Prophet.Prophet(model_backend=:turing)
+    @test model_backend(turing_model) == :turing
+    neural_model = Prophet.Prophet(model_backend=:flux_turing)
+    @test model_backend(neural_model) == :neural_turing
+    @test set_model_backend!(neural_model, :stan) === neural_model
+    @test model_backend(neural_model) == :stan
 end
 
 @testset "Stan backend artifact" begin
@@ -40,38 +51,45 @@ end
     end
 end
 
-@testset "Data prep, fit, predict, and future frames" begin
-    df = example_daily(30)
-    m = Prophet.Prophet()
-    history = setup_dataframe(m, df; initialize_scales=true)
+@testset "Data prep, fit, predict, and future frames by backend" begin
+    for backend in BACKENDS
+        @testset "$(backend)" begin
+            df = example_daily(30)
+            m = Prophet.Prophet(model_backend=backend)
+            history = setup_dataframe(m, df; initialize_scales=true)
 
-    @test "t" in names(history)
-    @test "y_scaled" in names(history)
-    @test minimum(history.t) == 0.0
-    @test maximum(history.t) == 1.0
-    @test maximum(abs.(history.y_scaled)) <= 1.0 + eps()
+            @test model_backend(m) == backend
+            @test "t" in names(history)
+            @test "y_scaled" in names(history)
+            @test minimum(history.t) == 0.0
+            @test maximum(history.t) == 1.0
+            @test maximum(abs.(history.y_scaled)) <= 1.0 + eps()
 
-    @test fit(m, df) === m
-    @test m.history !== nothing
-    @test m.params["k"] > 0
+            @test fit(m, df) === m
+            @test model_backend(m) == backend
+            @test m.history !== nothing
+            @test m.params["k"] > 0
 
-    future = make_future_dataframe(m; periods=3, include_history=false)
-    @test nrow(future) == 3
-    @test future.ds == [Date(2020, 1, 31), Date(2020, 2, 1), Date(2020, 2, 2)]
+            future = make_future_dataframe(m; periods=3, include_history=false)
+            @test nrow(future) == 3
+            @test future.ds == [Date(2020, 1, 31), Date(2020, 2, 1), Date(2020, 2, 2)]
 
-    forecast = predict(m, future)
-    @test names(forecast) == ["ds", "trend", "yhat", "yhat_lower", "yhat_upper", "trend_lower", "trend_upper"]
-    @test nrow(forecast) == 3
-    @test all(forecast.yhat_lower .<= forecast.yhat)
-    @test all(forecast.yhat .<= forecast.yhat_upper)
+            forecast = predict(m, future)
+            @test names(forecast) == ["ds", "trend", "yhat", "yhat_lower", "yhat_upper", "trend_lower", "trend_upper"]
+            @test nrow(forecast) == 3
+            @test all(forecast.yhat_lower .<= forecast.yhat)
+            @test all(forecast.yhat .<= forecast.yhat_upper)
 
-    no_uncertainty = Prophet.Prophet(uncertainty_samples=0)
-    fit(no_uncertainty, df)
-    fcst = predict(no_uncertainty, future)
-    @test names(fcst) == ["ds", "trend", "yhat"]
+            no_uncertainty = Prophet.Prophet(model_backend=backend, uncertainty_samples=0)
+            fit(no_uncertainty, df)
+            fcst = predict(no_uncertainty, future)
+            @test model_backend(no_uncertainty) == backend
+            @test names(fcst) == ["ds", "trend", "yhat"]
+        end
+    end
 end
 
-@testset "Growth helpers based on Python Prophet tests" begin
+@testset "Growth helpers based on Python Prophet tests by backend" begin
     t = collect(0.0:10.0)
     y = piecewise_linear(t, [0.5], 1.0, 0.0, [5.0])
     @test isapprox(y, [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.5, 8.0, 9.5, 11.0, 12.5])
@@ -83,33 +101,44 @@ end
 
     @test flat_trend(t, 0.5) == fill(0.5, length(t))
 
-    flat_model = Prophet.Prophet(growth="flat")
-    df = example_daily(20)
-    fit(flat_model, df)
-    future = make_future_dataframe(flat_model; periods=5, include_history=true)
-    fcst = predict(flat_model, future)
-    @test length(unique(round.(fcst.trend; digits=8))) == 1
+    for backend in BACKENDS
+        @testset "$(backend)" begin
+            flat_model = Prophet.Prophet(growth="flat", model_backend=backend)
+            df = example_daily(20)
+            fit(flat_model, df)
+            future = make_future_dataframe(flat_model; periods=5, include_history=true)
+            fcst = predict(flat_model, future)
+            @test model_backend(flat_model) == backend
+            @test length(unique(round.(fcst.trend; digits=8))) == 1
 
-    logistic_df = example_daily(20)
-    logistic_df.floor = fill(1.0, nrow(logistic_df))
-    logistic_df.cap = fill(100.0, nrow(logistic_df))
-    logistic_model = Prophet.Prophet(growth="logistic")
-    hist = setup_dataframe(logistic_model, logistic_df; initialize_scales=true)
-    @test logistic_model.logistic_floor
-    @test "cap_scaled" in names(hist)
-    @test all(hist.cap_scaled .> 0)
+            logistic_df = example_daily(20)
+            logistic_df.floor = fill(1.0, nrow(logistic_df))
+            logistic_df.cap = fill(100.0, nrow(logistic_df))
+            logistic_model = Prophet.Prophet(growth="logistic", model_backend=backend)
+            hist = setup_dataframe(logistic_model, logistic_df; initialize_scales=true)
+            @test model_backend(logistic_model) == backend
+            @test logistic_model.logistic_floor
+            @test "cap_scaled" in names(hist)
+            @test all(hist.cap_scaled .> 0)
+        end
+    end
 end
 
-@testset "Seasonality and regressor API" begin
-    m = Prophet.Prophet()
-    add_seasonality(m; name="monthly", period=30.5, fourier_order=3)
-    @test haskey(m.seasonalities, "monthly")
-    @test m.seasonalities["monthly"]["fourier_order"] == 3
-    @test_throws ErrorException add_seasonality(m; name="bad", period=7, fourier_order=0)
+@testset "Seasonality and regressor API by backend" begin
+    for backend in BACKENDS
+        @testset "$(backend)" begin
+            m = Prophet.Prophet(model_backend=backend)
+            add_seasonality(m; name="monthly", period=30.5, fourier_order=3)
+            @test model_backend(m) == backend
+            @test haskey(m.seasonalities, "monthly")
+            @test m.seasonalities["monthly"]["fourier_order"] == 3
+            @test_throws ErrorException add_seasonality(m; name="bad", period=7, fourier_order=0)
 
-    add_regressor(m; name="promo", prior_scale=2.0, standardize=false, mode="multiplicative")
-    @test haskey(m.extra_regressors, "promo")
-    @test m.extra_regressors["promo"]["mode"] == "multiplicative"
+            add_regressor(m; name="promo", prior_scale=2.0, standardize=false, mode="multiplicative")
+            @test haskey(m.extra_regressors, "promo")
+            @test m.extra_regressors["promo"]["mode"] == "multiplicative"
+        end
+    end
 
     dates = [Date(2012, 6, 1)]
     weekly = fourier_series(dates, 7, 3)
@@ -150,9 +179,12 @@ end
     @test names_used == ["launch"]
     @test sum(Matrix(features)) == 3.0
 
-    m2 = Prophet.Prophet()
-    add_country_holidays(m2; country_name="US")
-    @test m2.country_holidays == "US"
+    for backend in BACKENDS
+        m2 = Prophet.Prophet(model_backend=backend)
+        add_country_holidays(m2; country_name="US")
+        @test model_backend(m2) == backend
+        @test m2.country_holidays == "US"
+    end
 end
 
 @testset "Stan-equivalent Turing utilities" begin
@@ -237,40 +269,52 @@ end
     @test nn_model !== nothing
 end
 
-@testset "Diagnostics based on Python Prophet tests" begin
+@testset "Diagnostics based on Python Prophet tests by backend" begin
     df = example_daily(30)
-    m = Prophet.Prophet()
-    fit(m, df)
 
     cutoffs = generate_cutoffs(df, Day(4), Day(12), Day(4))
     @test !isempty(cutoffs)
     @test all(cutoffs .< maximum(df.ds))
 
-    cv = cross_validation(m; horizon=Day(4), initial=Day(12), period=Day(4))
-    @test all(["ds", "yhat", "y", "cutoff"] .in Ref(names(cv)))
-    @test all(Date.(cv.ds) .> Date.(cv.cutoff))
-    @test all(Date.(cv.ds) .<= Date.(cv.cutoff) .+ Day(4))
+    for backend in BACKENDS
+        @testset "$(backend)" begin
+            m = Prophet.Prophet(model_backend=backend)
+            fit(m, df)
 
-    cv_threads = cross_validation(m; horizon=Day(4), initial=Day(12), period=Day(4), parallel=:threads)
-    @test nrow(cv_threads) == nrow(cv)
+            cv = cross_validation(m; horizon=Day(4), initial=Day(12), period=Day(4))
+            @test model_backend(m) == backend
+            @test all(["ds", "yhat", "y", "cutoff", "model_backend"] .in Ref(names(cv)))
+            @test all(cv.model_backend .== String(backend))
+            @test all(Date.(cv.ds) .> Date.(cv.cutoff))
+            @test all(Date.(cv.ds) .<= Date.(cv.cutoff) .+ Day(4))
 
-    metrics = performance_metrics(cv; metrics=[:mse, :rmse, :mae, :mape, :smape, :coverage])
-    @test all(["horizon", "mse", "rmse", "mae", "mape", "smape", "coverage"] .in Ref(names(metrics)))
-    @test all(metrics.mse .>= 0)
-    @test all(metrics.rmse .>= 0)
-    @test all((0 .<= metrics.coverage) .& (metrics.coverage .<= 1))
+            cv_threads = cross_validation(m; horizon=Day(4), initial=Day(12), period=Day(4), parallel=:threads)
+            @test nrow(cv_threads) == nrow(cv)
 
-    raw_metrics = performance_metrics(cv; metrics=[:mse], rolling_window=-1)
-    @test nrow(raw_metrics) == nrow(cv)
+            metrics = performance_metrics(cv; metrics=[:mse, :rmse, :mae, :mape, :smape, :coverage])
+            @test all(["horizon", "mse", "rmse", "mae", "mape", "smape", "coverage"] .in Ref(names(metrics)))
+            @test all(metrics.mse .>= 0)
+            @test all(metrics.rmse .>= 0)
+            @test all((0 .<= metrics.coverage) .& (metrics.coverage .<= 1))
+
+            raw_metrics = performance_metrics(cv; metrics=[:mse], rolling_window=-1)
+            @test nrow(raw_metrics) == nrow(cv)
+        end
+    end
 end
 
-@testset "Plot backends" begin
-    m = Prophet.Prophet()
-    fit(m, example_daily(20))
-    fcst = predict(m, make_future_dataframe(m; periods=3))
+@testset "Plot backends by model backend" begin
+    for backend in BACKENDS
+        @testset "$(backend)" begin
+            m = Prophet.Prophet(model_backend=backend)
+            fit(m, example_daily(20))
+            fcst = predict(m, make_future_dataframe(m; periods=3))
 
-    @test plot_forecast(m, fcst; backend=:makie) isa CairoMakie.Figure
-    @test plot_forecast(m, fcst; backend=:gadfly) isa Gadfly.Plot
-    @test plot_forecast_component(m, fcst, "trend"; backend=:makie) isa CairoMakie.Figure
-    @test plot_forecast_component(m, fcst, "trend"; backend=:gadfly) isa Gadfly.Plot
+            @test model_backend(m) == backend
+            @test plot_forecast(m, fcst; backend=:makie) isa CairoMakie.Figure
+            @test plot_forecast(m, fcst; backend=:gadfly) isa Gadfly.Plot
+            @test plot_forecast_component(m, fcst, "trend"; backend=:makie) isa CairoMakie.Figure
+            @test plot_forecast_component(m, fcst, "trend"; backend=:gadfly) isa Gadfly.Plot
+        end
+    end
 end
