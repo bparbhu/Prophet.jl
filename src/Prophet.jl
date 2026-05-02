@@ -1,17 +1,58 @@
 module Prophet
 
-include("stan/prophet.stan")
-include("turing/prophet.jl")
-include("turing/neural_prophet.jl")
-include("diagnostics.jl")
-include("forecaster.jl")
-include("hdays.jl")
 include("make_holidays.jl")
-include("models.jl")
+include("turing/prophet-turing.jl")
+include("turing/neural_prophet.jl")
 include("plot.jl")
-include("serialize.jl")
-include("utilities.jl")
+include("forecaster_api.jl")
+include("diagnostics.jl")
 
-export 
+export ProphetModel,
+       add_country_holidays,
+       add_country_holidays!,
+       add_regressor,
+       add_regressor!,
+       add_seasonality,
+       add_seasonality!,
+       fit,
+       predict,
+       make_future_dataframe,
+       setup_dataframe,
+       initialize_scales!,
+       linear_growth_init,
+       logistic_growth_init,
+       flat_growth_init,
+       piecewise_linear,
+       piecewise_logistic,
+       generate_cutoffs,
+       cross_validation,
+       single_cutoff_forecast,
+       performance_metrics,
+       mse,
+       rmse,
+       mae,
+       mape,
+       mdape,
+       smape,
+       coverage,
+       fourier_series,
+       make_seasonality_features,
+       construct_holiday_dataframe,
+       make_holiday_features,
+       get_holiday_names,
+       make_holidays_df,
+       supported_holiday_countries,
+       get_changepoint_matrix,
+       logistic_gamma,
+       logistic_trend,
+       linear_trend,
+       flat_trend,
+       prophet_mean,
+       NeuralProphetNN,
+       neural_prophet_mean,
+       prophet,
+       neural_prophet,
+       plot_forecast,
+       plot_forecast_component
 
 end

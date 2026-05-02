@@ -1,60 +1,61 @@
+#!/usr/bin/env julia
+
+using CSV
 using DataFrames
 using Dates
-using CSV
+using Unicode
 
-import .hdays
-import holidays
-import inspect
-import unicodedata
+const DEFAULT_START_YEAR = 1995
+const DEFAULT_END_YEAR = 2044
+const REPO_ROOT = normpath(joinpath(@__DIR__, "..", ".."))
+const DEFAULT_INPUT = joinpath(REPO_ROOT, "data", "generated_holidays.csv")
+const DEFAULT_OUTPUT = joinpath(REPO_ROOT, "data", "generated_holidays.csv")
 
-function utf8_to_ascii(text)
-    ascii_text = (
-        unicodedata.normalize("NFD", text)
-        |> x -> PyCall.encode(x, "ascii", "ignore")
-        |> x -> PyCall.decode(x, "ascii")
-        |> x -> strip(x)
+function ascii_name(name)
+    stripped = strip(Unicode.normalize(String(name), stripmark=true))
+    ascii = String([c for c in stripped if Int(c) <= 0x7f])
+    return isempty(ascii) ? "FAILED_TO_PARSE" : ascii
+end
+
+function normalize_holidays_file(; input=DEFAULT_INPUT, output=DEFAULT_OUTPUT,
+                                 start_year=DEFAULT_START_YEAR, end_year=DEFAULT_END_YEAR)
+    df = CSV.read(input, DataFrame)
+    required = ["ds", "holiday", "country"]
+    missing_cols = setdiff(required, names(df))
+    isempty(missing_cols) || error("Missing required holiday columns: $(join(missing_cols, ", "))")
+
+    df.ds = Date.(df.ds)
+    df.country = uppercase.(String.(df.country))
+    df.holiday = ascii_name.(df.holiday)
+    df.year = year.(df.ds)
+    df = df[(start_year .<= df.year) .& (df.year .<= end_year) .& (df.holiday .!= "FAILED_TO_PARSE"), :]
+    unique!(df)
+    sort!(df, [:country, :ds, :holiday])
+
+    CSV.write(output, df)
+    return df
+end
+
+function main(args=ARGS)
+    input = get(ENV, "PROPHET_HOLIDAYS_INPUT", DEFAULT_INPUT)
+    output = get(ENV, "PROPHET_HOLIDAYS_OUTPUT", DEFAULT_OUTPUT)
+    start_year = parse(Int, get(ENV, "PROPHET_HOLIDAYS_START_YEAR", string(DEFAULT_START_YEAR)))
+    end_year = parse(Int, get(ENV, "PROPHET_HOLIDAYS_END_YEAR", string(DEFAULT_END_YEAR)))
+
+    if "--help" in args || "-h" in args
+        println("Regenerate/normalize data/generated_holidays.csv from an existing CSV source.")
+        println("Override paths with PROPHET_HOLIDAYS_INPUT and PROPHET_HOLIDAYS_OUTPUT.")
+        println("Override year range with PROPHET_HOLIDAYS_START_YEAR and PROPHET_HOLIDAYS_END_YEAR.")
+        return nothing
+    end
+
+    df = normalize_holidays_file(
+        input=input, output=output, start_year=start_year, end_year=end_year
     )
-
-    if sum(1 for x in ascii_text if x ∉ [' ', '(', ')', ',']) == 0
-        return "FAILED_TO_PARSE"
-    else
-        return ascii_text
-    end
+    println("Wrote $(nrow(df)) holidays to $output")
+    return nothing
 end
 
-function generate_holidays_file()
-    year_list = collect(1995:2044)
-    all_holidays = []
-
-    class_to_exclude = Set(["rd", "BY", "BG", "JP", "RS", "UA", "KR"])
-
-    class_list2 = inspect.getmembers(hdays, inspect.isclass)
-    country_set = Set([name for name in first.(class_list2) if length(name) == 2])
-    class_list1 = inspect.getmembers(holidays, inspect.isclass)
-    country_set1 = Set([name for name in first.(class_list1) if length(name) == 2])
-    union!(country_set, country_set1)
-    setdiff!(country_set, class_to_exclude)
-
-    for country in country_set
-        df = hdays2.make_holidays_df(year_list=year_list, country=country) |> DataFrame
-        df[!, :country] .= country
-        push!(all_holidays, df)
-    end
-
-    generated_holidays = vcat(all_holidays...)
-    generated_holidays[!, :year] = Dates.year.(generated_holidays[!, :ds])
-    sort!(generated_holidays, [:country, :ds, :holiday])
-
-    generated_holidays[!, :holiday] = utf8_to_ascii.(generated_holidays[!, :holiday])
-    failed_countries = unique(generated_holidays[generated_holidays.holiday .== "FAILED_TO_PARSE", :country])
-    
-    if !isempty(failed_countries)
-        println("Failed to convert UTF-8 holidays for:")
-        println(join(failed_countries, "\n"))
-    end
-    
-    @assert "FAILED_TO_PARSE" ∉ unique(generated_holidays[!, :holiday])
-    CSV.write("../R/data-raw/generated_holidays.csv", generated_holidays)
+if abspath(PROGRAM_FILE) == @__FILE__
+    main()
 end
-
-generate_holidays_file()
