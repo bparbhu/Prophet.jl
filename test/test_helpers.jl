@@ -5,3 +5,9 @@ function example_daily(n::Int=120)
 end
 
 const BACKENDS = (:stan, :turing, :neural_turing)
+
+expected_fit_engine(backend::Symbol) = Dict(
+    :stan => :stan_optimize,
+    :turing => :turing_map,
+    :neural_turing => :neural_turing_map,
+)[backend]

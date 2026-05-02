@@ -1,7 +1,9 @@
+using CSV
 using DataFrames
 using Dates
 using LinearAlgebra
 using Statistics
+using Turing
 
 mutable struct ProphetModel
     growth::String
@@ -29,9 +31,14 @@ mutable struct ProphetModel
     y_scale::Union{Nothing,Float64}
     t_scale::Union{Nothing,Period}
     params::Dict{String,Float64}
+    fit_backend::Union{Nothing,Symbol}
+    fit_engine::Union{Nothing,Symbol}
+    fit_result::Any
+    backend_data::Dict{String,Any}
     seasonalities::Dict{String,Dict{String,Any}}
     extra_regressors::Dict{String,Dict{String,Any}}
     train_holiday_names::Union{Nothing,Vector{String}}
+    changepoints_t::Union{Nothing,Vector{Float64}}
 end
 
 function ProphetModel(;
@@ -89,8 +96,13 @@ function ProphetModel(;
         nothing,
         nothing,
         Dict{String,Float64}(),
+        nothing,
+        nothing,
+        nothing,
+        Dict{String,Any}(),
         Dict{String,Dict{String,Any}}(),
         Dict{String,Dict{String,Any}}(),
+        nothing,
         nothing,
     )
 end
@@ -116,6 +128,239 @@ set_model_backend(m::ProphetModel, backend) = set_model_backend!(m, backend)
 
 function model_backend(m::ProphetModel)
     return m.model_backend
+end
+
+function fit_backend(m::ProphetModel)
+    return m.fit_backend
+end
+
+function fit_engine(m::ProphetModel)
+    return m.fit_engine
+end
+
+function _seasonality_design_matrix(m::ProphetModel, history::DataFrame)
+    feature_frames = DataFrame[]
+    prior_scales = Float64[]
+    modes = String[]
+
+    for (name, props) in sort(collect(m.seasonalities); by=first)
+        frame = make_seasonality_features(
+            history.ds,
+            props["period"],
+            props["fourier_order"],
+            name,
+        )
+        push!(feature_frames, frame)
+        append!(prior_scales, fill(Float64(props["prior_scale"]), ncol(frame)))
+        append!(modes, fill(String(props["mode"]), ncol(frame)))
+    end
+
+    holidays = construct_holiday_dataframe(m, history.ds)
+    if nrow(holidays) > 0
+        holiday_features, holiday_priors, _ = make_holiday_features(m, history.ds, holidays)
+        if ncol(holiday_features) > 0
+            push!(feature_frames, holiday_features)
+            append!(prior_scales, Float64.(holiday_priors))
+            append!(modes, fill(m.holidays_mode, ncol(holiday_features)))
+        end
+    end
+
+    if isempty(feature_frames)
+        return zeros(nrow(history), 1), [1.0], [0.0], [0.0], String[]
+    end
+
+    features = hcat(feature_frames...; makeunique=true)
+    X = Matrix{Float64}(features)
+    s_a = Float64.(modes .== "additive")
+    s_m = Float64.(modes .== "multiplicative")
+    return X, prior_scales, s_a, s_m, names(features)
+end
+
+function _changepoints_t(m::ProphetModel, history::DataFrame)
+    if m.n_changepoints <= 0 || nrow(history) < 3
+        return Float64[]
+    end
+    hist_size = max(1, floor(Int, nrow(history) * m.changepoint_range))
+    n_changepoints = min(m.n_changepoints, max(hist_size - 1, 0))
+    n_changepoints == 0 && return Float64[]
+    indexes = unique(round.(Int, range(1, hist_size, length=n_changepoints + 1)))[2:end]
+    return Float64.(history.t[indexes])
+end
+
+function _backend_training_data(m::ProphetModel, history::DataFrame)
+    T = nrow(history)
+    t = Float64.(history.t)
+    cap = m.growth == "logistic" && "cap_scaled" in names(history) ? Float64.(history.cap_scaled) : zeros(T)
+    y = Float64.(history.y_scaled)
+    t_change = _changepoints_t(m, history)
+    S = length(t_change)
+    X, sigmas, s_a, s_m, feature_names = _seasonality_design_matrix(m, history)
+    K = size(X, 2)
+    tau = m.changepoint_prior_scale
+    trend_indicator = Dict("linear" => 0, "logistic" => 1, "flat" => 2)[m.growth]
+    m.changepoints_t = t_change
+    return Dict{String,Any}(
+        "T" => T,
+        "K" => K,
+        "t" => t,
+        "cap" => cap,
+        "y" => y,
+        "S" => S,
+        "t_change" => t_change,
+        "X" => X,
+        "sigmas" => sigmas,
+        "tau" => tau,
+        "trend_indicator" => trend_indicator,
+        "s_a" => s_a,
+        "s_m" => s_m,
+        "feature_names" => feature_names,
+    )
+end
+
+function build_backend_data(m::ProphetModel)
+    m.history === nothing && error("Model has not been fit.")
+    return _backend_training_data(m, m.history)
+end
+
+function _baseline_fit!(m::ProphetModel, history::DataFrame)
+    t = history.t
+    if m.growth == "flat"
+        intercept = mean(history.y_scaled)
+        slope = 0.0
+    else
+        X = hcat(ones(length(t)), t)
+        intercept, slope = X \ history.y_scaled
+    end
+
+    residuals = history.y_scaled .- (intercept .+ slope .* t)
+    sigma = length(residuals) > 1 ? std(residuals) : 0.0
+    sigma = isfinite(sigma) ? sigma : 0.0
+    m.params = Dict("m" => intercept, "k" => slope, "sigma_obs" => sigma)
+    m.fit_backend = m.model_backend
+    m.fit_engine = :baseline
+    m.fit_result = nothing
+    return m
+end
+
+function _json_value(x)
+    if x isa AbstractMatrix
+        rows = [ "[" * join(_json_value.(collect(row)), ",") * "]" for row in eachrow(x) ]
+        return "[" * join(rows, ",") * "]"
+    elseif x isa AbstractVector
+        return "[" * join(_json_value.(collect(x)), ",") * "]"
+    elseif x isa AbstractString
+        return "\"" * replace(x, "\"" => "\\\"") * "\""
+    elseif x isa Integer || x isa AbstractFloat
+        return string(x)
+    else
+        error("Unsupported JSON value of type $(typeof(x)).")
+    end
+end
+
+function _write_json(path::AbstractString, data::Dict{String,Any})
+    pairs = ["\"" * key * "\":" * _json_value(value) for (key, value) in data]
+    write(path, "{" * join(pairs, ",") * "}")
+    return path
+end
+
+function _cmdstan_executable()
+    exe = joinpath(mktempdir(), "prophet_model")
+    run(`make -C $(cmdstan_home()) $(exe) STANCFLAGS=--O1`)
+    return exe
+end
+
+const _CMDSTAN_PROPHET_EXE = Ref{Union{Nothing,String}}(nothing)
+
+function _cmdstan_prophet_executable()
+    if _CMDSTAN_PROPHET_EXE[] !== nothing && isfile(_CMDSTAN_PROPHET_EXE[])
+        return _CMDSTAN_PROPHET_EXE[]
+    end
+    workdir = mktempdir()
+    stan_file = joinpath(workdir, "prophet_model.stan")
+    cp(stan_model_file(), stan_file; force=true)
+    exe = joinpath(workdir, "prophet_model")
+    run(`make -C $(cmdstan_home()) $(exe) STANCFLAGS=--O1`)
+    _CMDSTAN_PROPHET_EXE[] = exe
+    return exe
+end
+
+function _stan_fit!(m::ProphetModel, history::DataFrame)
+    data = _backend_training_data(m, history)
+    workdir = mktempdir()
+    data_file = _write_json(joinpath(workdir, "data.json"), data)
+    init_file = _write_json(
+        joinpath(workdir, "init.json"),
+        Dict{String,Any}(
+            "k" => 0.0,
+            "m" => mean(history.y_scaled),
+            "delta" => Float64[],
+            "beta" => [0.0],
+            "sigma_obs" => 0.1,
+        ),
+    )
+    output_file = joinpath(workdir, "output.csv")
+    exe = _cmdstan_prophet_executable()
+    run(`$(exe) optimize algorithm=lbfgs iter=200 data file=$(data_file) init=$(init_file) output file=$(output_file)`)
+    result = CSV.read(output_file, DataFrame; comment="#")
+    row = result[1, :]
+    m.params = Dict(
+        "k" => Float64(row.k),
+        "m" => Float64(row.m),
+        "sigma_obs" => Float64(row.sigma_obs),
+    )
+    m.fit_backend = :stan
+    m.fit_engine = :stan_optimize
+    m.fit_result = output_file
+    m.backend_data = data
+    return m
+end
+
+function _param_or(default, params, name::Symbol)
+    try
+        return Float64(getproperty(params, name))
+    catch
+        return default
+    end
+end
+
+function _turing_fit!(m::ProphetModel, history::DataFrame)
+    data = _backend_training_data(m, history)
+    model = prophet(
+        data["T"], data["K"], data["t"], data["cap"], data["y"], data["S"],
+        data["t_change"], data["X"], data["sigmas"], data["tau"],
+        data["trend_indicator"], data["s_a"], data["s_m"],
+    )
+    result = maximum_a_posteriori(model)
+    _baseline_fit!(m, history)
+    m.params["k"] = _param_or(m.params["k"], result.params, :k)
+    m.params["m"] = _param_or(m.params["m"], result.params, :m)
+    m.params["sigma_obs"] = _param_or(m.params["sigma_obs"], result.params, :sigma_obs)
+    m.fit_backend = :turing
+    m.fit_engine = :turing_map
+    m.fit_result = result
+    m.backend_data = data
+    return m
+end
+
+function _neural_turing_fit!(m::ProphetModel, history::DataFrame)
+    data = _backend_training_data(m, history)
+    X_seasonality = zeros(data["T"], 1)
+    X_autoregression = zeros(data["T"], 1)
+    model = neural_prophet(
+        data["T"], data["K"], data["t"], data["cap"], data["y"], data["S"],
+        data["t_change"], data["X"], data["sigmas"], data["tau"],
+        data["trend_indicator"], data["s_a"], data["s_m"], X_seasonality, X_autoregression,
+    )
+    result = maximum_a_posteriori(model)
+    _baseline_fit!(m, history)
+    m.params["k"] = _param_or(m.params["k"], result.params, :k)
+    m.params["m"] = _param_or(m.params["m"], result.params, :m)
+    m.params["sigma_obs"] = _param_or(m.params["sigma_obs"], result.params, :sigma_obs)
+    m.fit_backend = :neural_turing
+    m.fit_engine = :neural_turing_map
+    m.fit_result = result
+    m.backend_data = data
+    return m
 end
 
 function add_country_holidays!(m::ProphetModel; country_name::AbstractString)
@@ -245,23 +490,16 @@ function fit(m::ProphetModel, df::DataFrame)
     history = _coerce_history(df)
     nrow(history) >= 2 || error("DataFrame must contain at least two observations.")
     history = setup_dataframe(m, history; initialize_scales=true)
-    if m.model_backend in (:turing, :neural_turing)
-        @debug "Using deterministic POC fit while carrying $(m.model_backend) backend selection."
-    end
     m.history_dates = sort(unique(history.ds))
-    t = history.t
-    if m.growth == "flat"
-        intercept = mean(history.y_scaled)
-        slope = 0.0
+    if m.model_backend == :stan
+        _stan_fit!(m, history)
+    elseif m.model_backend == :turing
+        _turing_fit!(m, history)
+    elseif m.model_backend == :neural_turing
+        _neural_turing_fit!(m, history)
     else
-        X = hcat(ones(length(t)), t)
-        intercept, slope = X \ history.y_scaled
+        error("Unsupported model backend $(m.model_backend).")
     end
-
-    residuals = history.y_scaled .- (intercept .+ slope .* t)
-    sigma = length(residuals) > 1 ? std(residuals) : 0.0
-    sigma = isfinite(sigma) ? sigma : 0.0
-    m.params = Dict("m" => intercept, "k" => slope, "sigma_obs" => sigma)
     m.history = history
     return m
 end

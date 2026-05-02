@@ -9,6 +9,8 @@
         @testset "$(backend)" begin
             m = Prophet.ProphetModel(model_backend=backend)
             fit(m, df)
+            @test fit_backend(m) == backend
+            @test fit_engine(m) == expected_fit_engine(backend)
 
             cv = cross_validation(m; horizon=Day(4), initial=Day(12), period=Day(4))
             @test model_backend(m) == backend

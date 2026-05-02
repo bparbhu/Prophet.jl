@@ -14,6 +14,8 @@
 
             @test fit(m, df) === m
             @test model_backend(m) == backend
+            @test fit_backend(m) == backend
+            @test fit_engine(m) == expected_fit_engine(backend)
             @test m.history !== nothing
             @test m.params["k"] > 0
 
@@ -31,6 +33,8 @@
             fit(no_uncertainty, df)
             fcst = predict(no_uncertainty, future)
             @test model_backend(no_uncertainty) == backend
+            @test fit_backend(no_uncertainty) == backend
+            @test fit_engine(no_uncertainty) == expected_fit_engine(backend)
             @test names(fcst) == ["ds", "trend", "yhat"]
         end
     end
