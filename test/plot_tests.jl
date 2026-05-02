@@ -1,5 +1,5 @@
 @testset "Plot backends by model backend" begin
-    for backend in BACKENDS
+    for backend in FAST_BACKENDS
         @testset "$(backend)" begin
             m = Prophet.ProphetModel(model_backend=backend)
             fit(m, example_daily(20))

@@ -1,5 +1,5 @@
 @testset "Data prep, fit, predict, and future frames by backend" begin
-    for backend in BACKENDS
+    for backend in FAST_BACKENDS
         @testset "$(backend)" begin
             df = example_daily(30)
             m = Prophet.ProphetModel(model_backend=backend)
@@ -37,5 +37,15 @@
             @test fit_engine(no_uncertainty) == expected_fit_engine(backend)
             @test names(fcst) == ["ds", "trend", "yhat"]
         end
+    end
+
+    @testset "stan" begin
+        df = example_daily(12)
+        m = Prophet.ProphetModel(model_backend=:stan, n_changepoints=2)
+        @test fit(m, df) === m
+        @test fit_backend(m) == :stan
+        @test fit_engine(m) == :stan_optimize
+        forecast = predict(m, make_future_dataframe(m; periods=2, include_history=false))
+        @test nrow(forecast) == 2
     end
 end

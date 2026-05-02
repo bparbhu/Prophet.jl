@@ -82,7 +82,7 @@ function _copy_for_cross_validation(m::ProphetModel)
     return m2
 end
 
-function single_cutoff_forecast(df::DataFrame, model::ProphetModel, cutoff::Date, horizon)
+function single_cutoff_forecast(df::DataFrame, model::ProphetModel, cutoff::Date, horizon; predict_columns=nothing)
     h = _period(horizon)
     history_c = df[Date.(df.ds) .<= cutoff, :]
     nrow(history_c) >= 2 || error("Less than two datapoints before cutoff.")
@@ -91,11 +91,17 @@ function single_cutoff_forecast(df::DataFrame, model::ProphetModel, cutoff::Date
     fit(m, history_c)
 
     index_predicted = (Date.(df.ds) .> cutoff) .& (Date.(df.ds) .<= cutoff + h)
-    future = df[index_predicted, [:ds]]
+    future = df[index_predicted, setdiff(Symbol.(names(df)), [:y, :y_scaled, :t, :cap_scaled])]
     fcst = predict(m, future)
     fcst.y = Float64.(df[index_predicted, :y])
     fcst.cutoff = fill(cutoff, nrow(fcst))
     fcst.model_backend = fill(String(model_backend(m)), nrow(fcst))
+    if predict_columns !== nothing
+        keep = Symbol.(predict_columns)
+        append!(keep, [:y, :cutoff, :model_backend])
+        keep = [col for col in keep if String(col) in names(fcst)]
+        fcst = fcst[:, unique(keep)]
+    end
     return fcst
 end
 
@@ -114,6 +120,7 @@ function cross_validation(
     cutoffs=nothing,
     parallel=nothing,
     disable_tqdm=false,
+    extra_output_columns=nothing,
 )
     model.history === nothing && error("Model has not been fit.")
     df = copy(model.history)
@@ -121,17 +128,30 @@ function cross_validation(
     p = isnothing(period) ? Day(max(1, Int(floor(Dates.value(h) / 2)))) : _period(period)
     i = isnothing(initial) ? 3 * h : _period(initial)
     resolved_cutoffs = isnothing(cutoffs) ? generate_cutoffs(df, h, i, p) : Date.(cutoffs)
+    if !isnothing(cutoffs)
+        minimum(resolved_cutoffs) <= minimum(Date.(df.ds)) &&
+            error("Minimum cutoff value is not strictly greater than min date in history.")
+        maximum(resolved_cutoffs) > maximum(Date.(df.ds)) - h &&
+            error("Maximum cutoff value is greater than end date minus horizon.")
+    end
+
+    predict_columns = ["ds", "yhat"]
+    model.uncertainty_samples != 0 && append!(predict_columns, ["yhat_lower", "yhat_upper"])
+    if extra_output_columns !== nothing
+        extras = extra_output_columns isa AbstractString ? [String(extra_output_columns)] : String.(extra_output_columns)
+        append!(predict_columns, setdiff(extras, predict_columns))
+    end
 
     if parallel in (:dagger, "dagger", "dask")
-        tasks = [Dagger.@spawn single_cutoff_forecast(df, model, cutoff, h) for cutoff in resolved_cutoffs]
+        tasks = [Dagger.@spawn single_cutoff_forecast(df, model, cutoff, h; predict_columns=predict_columns) for cutoff in resolved_cutoffs]
         return vcat(fetch.(tasks)...)
-    elseif parallel in (:threads, "threads")
-        tasks = [Threads.@spawn single_cutoff_forecast(df, model, cutoff, h) for cutoff in resolved_cutoffs]
+    elseif parallel in (:threads, "threads", :processes, "processes")
+        tasks = [Threads.@spawn single_cutoff_forecast(df, model, cutoff, h; predict_columns=predict_columns) for cutoff in resolved_cutoffs]
         return vcat(fetch.(tasks)...)
     elseif isnothing(parallel) || parallel == false
-        return vcat([single_cutoff_forecast(df, model, cutoff, h) for cutoff in resolved_cutoffs]...)
+        return vcat([single_cutoff_forecast(df, model, cutoff, h; predict_columns=predict_columns) for cutoff in resolved_cutoffs]...)
     else
-        error("Unsupported parallel mode $parallel. Use nothing, :threads, or :dagger.")
+        error("'parallel' should be one of nothing, :threads, :processes, :dagger, or \"dask\".")
     end
 end
 
@@ -147,7 +167,7 @@ mse(df::DataFrame) = _metric_frame(df, :mse, (df.y .- df.yhat) .^ 2)
 rmse(df::DataFrame) = _metric_frame(df, :rmse, sqrt.((df.y .- df.yhat) .^ 2))
 mae(df::DataFrame) = _metric_frame(df, :mae, abs.(df.y .- df.yhat))
 mape(df::DataFrame) = _metric_frame(df, :mape, abs.((df.y .- df.yhat) ./ df.y))
-mdape(df::DataFrame) = DataFrame(:horizon => [maximum(_horizon(df))], :mdape => [median(abs.((df.y .- df.yhat) ./ df.y))])
+mdape(df::DataFrame) = _metric_frame(df, :mdape, abs.((df.y .- df.yhat) ./ df.y))
 smape(df::DataFrame) = _metric_frame(df, :smape, abs.(df.y .- df.yhat) ./ ((abs.(df.y) .+ abs.(df.yhat)) ./ 2))
 
 function coverage(df::DataFrame)
@@ -156,13 +176,57 @@ function coverage(df::DataFrame)
     return _metric_frame(df, :coverage, (df.yhat_lower .<= df.y) .& (df.y .<= df.yhat_upper))
 end
 
+function rolling_mean_by_h(x, h, w::Integer, name::Symbol)
+    df = DataFrame(x=Float64.(x), h=h)
+    grouped = combine(groupby(df, :h), :x => sum => :x_sum, :x => length => :n)
+    sort!(grouped, :h)
+    w <= 1 && return DataFrame(:horizon => grouped.h, name => grouped.x_sum ./ grouped.n)
+
+    out_h = eltype(grouped.h)[]
+    out_x = Float64[]
+    for i in 1:nrow(grouped)
+        total = 0.0
+        count = 0
+        j = i
+        while j >= 1 && count < w
+            take = min(grouped.n[j], w - count)
+            total += take * grouped.x_sum[j] / grouped.n[j]
+            count += take
+            j -= 1
+        end
+        count == w || continue
+        push!(out_h, grouped.h[i])
+        push!(out_x, total / w)
+    end
+    return DataFrame(:horizon => out_h, name => out_x)
+end
+
+function rolling_median_by_h(x, h, w::Integer, name::Symbol)
+    df = DataFrame(x=Float64.(x), h=h)
+    sort!(df, :h)
+    unique_h = sort(unique(df.h))
+    out_h = eltype(unique_h)[]
+    out_x = Float64[]
+    for horizon in unique_h
+        values = reverse(df[df.h .<= horizon, :x])
+        length(values) >= w || continue
+        push!(out_h, horizon)
+        push!(out_x, median(values[1:w]))
+    end
+    return DataFrame(:horizon => out_h, name => out_x)
+end
+
 function _aggregate_metric(metric_df::DataFrame, metric::Symbol, rolling_window)
     sort!(metric_df, :horizon)
     if rolling_window < 0
         return metric_df
     end
-    grouped = combine(groupby(metric_df, :horizon), metric => mean => metric)
-    return grouped
+    w = max(1, min(nrow(metric_df), Int(floor(rolling_window * nrow(metric_df)))))
+    if metric in (:mdape,)
+        return rolling_median_by_h(metric_df[!, metric], metric_df.horizon, w, metric)
+    else
+        return rolling_mean_by_h(metric_df[!, metric], metric_df.horizon, w, metric)
+    end
 end
 
 """
@@ -175,6 +239,7 @@ Supported metrics are `mse`, `rmse`, `mae`, `mape`, `mdape`, `smape`, and
 function performance_metrics(df::DataFrame; metrics=nothing, rolling_window=0.1, monthly=false)
     valid = [:mse, :rmse, :mae, :mape, :mdape, :smape, :coverage]
     selected = isnothing(metrics) ? valid : Symbol.(metrics)
+    length(unique(selected)) == length(selected) || error("Input metrics must be unique.")
     if !("yhat_lower" in names(df) && "yhat_upper" in names(df))
         selected = filter(!=(:coverage), selected)
     end

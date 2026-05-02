@@ -24,9 +24,8 @@ function fit_backend(df::DataFrame, backend::Symbol; periods::Int=30)
     return model, forecast
 end
 
-function compare_backends(; periods::Int=30)
+function compare_backends(; periods::Int=30, backends=(:stan, :turing, :neural_turing))
     df = backend_comparison_daily()
-    backends = (:stan, :turing, :neural_turing)
     fitted = Dict{Symbol,Any}()
     forecasts = DataFrame[]
 
@@ -43,19 +42,20 @@ function compare_backends(; periods::Int=30)
         backend=String[],
         final_yhat=Float64[],
         mean_yhat=Float64[],
-        mean_abs_diff_vs_stan=Float64[],
+        mean_abs_diff_vs_reference=Float64[],
     )
 
     for backend in backends
         yhat = wide[!, Symbol(String(backend))]
-        stan_yhat = wide[!, :stan]
+        reference_backend = Symbol(String(first(backends)))
+        reference_yhat = wide[!, reference_backend]
         push!(
             summary,
             (
                 String(backend),
                 last(yhat),
                 mean(yhat),
-                mean(abs.(yhat .- stan_yhat)),
+                mean(abs.(yhat .- reference_yhat)),
             ),
         )
     end

@@ -1,12 +1,15 @@
 module Prophet
 
 include("make_holidays.jl")
+include("models.jl")
 include("stan_backend.jl")
 include("turing/prophet-turing.jl")
 include("turing/neural_prophet.jl")
 include("plot.jl")
 include("forecaster_api.jl")
 include("diagnostics.jl")
+include("serialize.jl")
+include("utilities.jl")
 
 export ProphetModel,
        add_country_holidays,
@@ -20,6 +23,18 @@ export ProphetModel,
        model_backend,
        fit_backend,
        fit_engine,
+       TrendIndicator,
+       LINEAR,
+       LOGISTIC,
+       FLAT,
+       ModelInputData,
+       ModelParams,
+       trend_indicator,
+       model_input_data,
+       model_input_data_dict,
+       model_params_dict,
+       sanitize_custom_inits,
+       stan_to_dict,
        fit,
        predict,
        make_future_dataframe,
@@ -34,7 +49,16 @@ export ProphetModel,
        generate_cutoffs,
        cross_validation,
        single_cutoff_forecast,
+       rolling_mean_by_h,
+       rolling_median_by_h,
        performance_metrics,
+       model_to_dict,
+       model_from_dict,
+       model_to_json,
+       model_from_json,
+       warm_start_params,
+       regressor_index,
+       regressor_coefficients,
        mse,
        rmse,
        mae,

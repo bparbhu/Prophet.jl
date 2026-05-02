@@ -1,152 +1,158 @@
 using JSON
-using OrderedCollections
-using DataFrames
-using Dates
-using TimeZones
 
-include("path/to/prophet.stan")  # Replace this with the path to your Prophet.jl file
-using .Prophet
+const PROPHET_JL_SERIALIZATION_VERSION = "0.1.0"
 
-const PROPHET_VERSION = "0.1"  # Update this according to your Julia implementation's version
-
-const SIMPLE_ATTRIBUTES = [
-    :growth, :n_changepoints, :specified_changepoints, :changepoint_range,
-    :yearly_seasonality, :weekly_seasonality, :daily_seasonality,
-    :seasonality_mode, :seasonality_prior_scale, :changepoint_prior_scale,
-    :holidays_prior_scale, :mcmc_samples, :interval_width, :uncertainty_samples,
-    :y_scale, :logistic_floor, :country_holidays, :component_modes
-]
-
-const PD_SERIES = [:changepoints, :history_dates, :train_holiday_names]
-
-const PD_TIMESTAMP = [:start]
-
-const PD_TIMEDELTA = [:t_scale]
-
-const PD_DATAFRAME = [:holidays, :history, :train_component_cols]
-
-const NP_ARRAY = [:changepoints_t]
-
-const ORDEREDDICT = [:seasonalities, :extra_regressors]
-
-# The rest of the code adapted to work with the local Julia implementation of Prophet
-
-function model_to_dict(model)
-    if isnothing(model.history)
-        error("This can only be used to serialize models that have already been fit.")
+function _serialize_value(x)
+    if x === nothing || x isa Number || x isa Bool || x isa AbstractString
+        return x
+    elseif x isa Symbol
+        return String(x)
+    elseif x isa Date
+        return string(x)
+    elseif x isa Period
+        return Dict("__period__" => string(typeof(x).name.name), "value" => Dates.value(x))
+    elseif x isa AbstractVector
+        return [_serialize_value(v) for v in x]
+    elseif x isa AbstractMatrix
+        return [[_serialize_value(x[i, j]) for j in 1:size(x, 2)] for i in 1:size(x, 1)]
+    elseif x isa DataFrame
+        return Dict(
+            "__dataframe__" => true,
+            "names" => names(x),
+            "columns" => Dict(name => _serialize_value(collect(x[!, name])) for name in names(x)),
+        )
+    elseif x isa Dict
+        return Dict(String(k) => _serialize_value(v) for (k, v) in x)
+    else
+        return string(x)
     end
-
-    model_dict = Dict(attribute => getfield(model, attribute) for attribute in SIMPLE_ATTRIBUTES)
-    for attribute in PD_SERIES
-        if isnothing(getfield(model, attribute))
-            model_dict[attribute] = nothing
-        else
-            model_dict[attribute] = JSON.json(getfield(model, attribute), dateformat="iso")
-        end
-    end
-
-    for attribute in PD_TIMESTAMP
-        model_dict[attribute] = Dates.datetime2unix(getfield(model, attribute))
-    end
-
-    for attribute in PD_TIMEDELTA
-        model_dict[attribute] = getfield(model, attribute).value / 1000
-    end
-
-    for attribute in PD_DATAFRAME
-        if isnothing(getfield(model, attribute))
-            model_dict[attribute] = nothing
-        else
-            model_dict[attribute] = JSON.json(getfield(model, attribute), orient="table")
-        end
-    end
-
-    for attribute in NP_ARRAY
-        model_dict[attribute] = vec(getfield(model, attribute))
-    end
-
-    for attribute in ORDEREDDICT
-        model_dict[attribute] = [collect(keys(getfield(model, attribute))), getfield(model, attribute)]
-    end
-
-    fit_kwargs = deepcopy(model.fit_kwargs)
-    if haskey(fit_kwargs, "init")
-        for (k, v) in fit_kwargs["init"]
-            if isa(v, Vector)
-                fit_kwargs["init"][k] = vec(v)
-            elseif isa(v, AbstractFloat)
-                fit_kwargs["init"][k] = Float64(v)
-            end
-        end
-    end
-    model_dict["fit_kwargs"] = fit_kwargs
-    model_dict["params"] = Dict(k => vec(v) for (k, v) in model.params)
-    model_dict["__prophet_version"] = PROPHET_VERSION
-    return model_dict
 end
 
-model_to_json(model) = JSON.json(model_to_dict(model))
-
-function model_from_dict(model_dict)
-    model = ProphetModel()
-    for attribute in SIMPLE_ATTRIBUTES
-        setfield!(model, attribute, model_dict[attribute])
-    end
-    for attribute in PD_SERIES
-        if isnothing(model_dict[attribute])
-            setfield!(model, attribute, nothing)
-        else
-            s = JSON.parse(String, model_dict[attribute], typ="series", orient="split")
-            if s.name == "ds"
-                if isempty(s)
-                    s = Dates.DateTime.(s)
-                end
-                s = TimeZones.localzone()(s)
-            end
-            setfield!(model, attribute, s)
-        end
-    end
-
-    for attribute in PD_TIMESTAMP
-        setfield!(model, attribute, Dates.unix2datetime(model_dict[attribute]))
-    end
-
-    for attribute in PD_TIMEDELTA
-        setfield!(model, attribute, Dates.Millisecond(model_dict[attribute] * 1000))
-    end
-
-    for attribute in PD_DATAFRAME
-        if isnothing(model_dict[attribute])
-            setfield!(model, attribute, nothing)
-        else
-            df = JSON.parse(String, model_dict[attribute], typ="frame", orient="table", convert_dates=["ds"])
-            if attribute == :train_component_cols
-                # Special handling because of named index column
-                df = rename!(df, Dict(:component => "component", :col => "col"))
-            end
-            setfield!(model, attribute, df)
-        end
-    end
-
-    for attribute in NP_ARRAY
-        setfield!(model, attribute, Array{Float64}(model_dict[attribute]))
-    end
-
-    for attribute in ORDEREDDICT
-        key_list, unordered_dict = model_dict[attribute]
-        od = OrderedDict()
-        for key in key_list
-            od[key] = unordered_dict[key]
-        end
-        setfield!(model, attribute, od)
-    end
-
-    model.fit_kwargs = model_dict["fit_kwargs"]
-    model.params = Dict(k => Array{Float64}(v) for (k, v) in model_dict["params"])
-    model.stan_backend = nothing
-    model.stan_fit = nothing
-    return model
+function _deserialize_period(d::Dict)
+    kind = d["__period__"]
+    value = Int(d["value"])
+    kind == "Day" && return Day(value)
+    kind == "Week" && return Week(value)
+    kind == "Hour" && return Hour(value)
+    kind == "Minute" && return Minute(value)
+    kind == "Millisecond" && return Millisecond(value)
+    return Day(value)
 end
 
-model_from_json(model_json) = model_from_dict(JSON.parse(String, model_json))
+function _deserialize_dataframe(d::Dict)
+    cols = Pair{Symbol,Any}[]
+    for name in d["names"]
+        values = d["columns"][name]
+        if name in ("ds", "cutoff")
+            values = Date.(values)
+        end
+        push!(cols, Symbol(name) => values)
+    end
+    return DataFrame(cols...)
+end
 
+function _deserialize_value(x)
+    if x isa Dict
+        haskey(x, "__period__") && return _deserialize_period(x)
+        haskey(x, "__dataframe__") && return _deserialize_dataframe(x)
+        return Dict(String(k) => _deserialize_value(v) for (k, v) in x)
+    elseif x isa AbstractVector
+        return [_deserialize_value(v) for v in x]
+    else
+        return x
+    end
+end
+
+"""
+    model_to_dict(model)
+
+Serialize a fitted `ProphetModel` to Julia-native dictionaries and arrays. This
+mirrors Python Prophet's serialize tests at the API level: fitted model state,
+parameters, backend metadata, holidays, regressors, and seasonalities are
+preserved without storing the backend fit object itself.
+"""
+function model_to_dict(m::ProphetModel)
+    m.history === nothing && error("This can only be used to serialize models that have already been fit.")
+    return Dict{String,Any}(
+        "__prophet_jl_version" => PROPHET_JL_SERIALIZATION_VERSION,
+        "growth" => m.growth,
+        "model_backend" => String(m.model_backend),
+        "n_changepoints" => m.n_changepoints,
+        "changepoint_range" => m.changepoint_range,
+        "yearly_seasonality" => _serialize_value(m.yearly_seasonality),
+        "weekly_seasonality" => _serialize_value(m.weekly_seasonality),
+        "daily_seasonality" => _serialize_value(m.daily_seasonality),
+        "country_holidays" => m.country_holidays,
+        "holidays" => _serialize_value(m.holidays),
+        "seasonality_mode" => m.seasonality_mode,
+        "holidays_mode" => m.holidays_mode,
+        "seasonality_prior_scale" => m.seasonality_prior_scale,
+        "holidays_prior_scale" => m.holidays_prior_scale,
+        "changepoint_prior_scale" => m.changepoint_prior_scale,
+        "mcmc_samples" => m.mcmc_samples,
+        "interval_width" => m.interval_width,
+        "uncertainty_samples" => m.uncertainty_samples,
+        "logistic_floor" => m.logistic_floor,
+        "history" => _serialize_value(m.history),
+        "history_dates" => _serialize_value(m.history_dates),
+        "start" => _serialize_value(m.start),
+        "y_min" => m.y_min,
+        "y_scale" => m.y_scale,
+        "t_scale" => _serialize_value(m.t_scale),
+        "params" => _serialize_value(m.params),
+        "fit_backend" => isnothing(m.fit_backend) ? nothing : String(m.fit_backend),
+        "fit_engine" => isnothing(m.fit_engine) ? nothing : String(m.fit_engine),
+        "backend_data" => _serialize_value(m.backend_data),
+        "seasonalities" => _serialize_value(m.seasonalities),
+        "extra_regressors" => _serialize_value(m.extra_regressors),
+        "train_holiday_names" => _serialize_value(m.train_holiday_names),
+        "changepoints_t" => _serialize_value(m.changepoints_t),
+    )
+end
+
+model_to_json(m::ProphetModel) = JSON.json(model_to_dict(m))
+
+function model_from_dict(raw::Dict)
+    d = Dict(String(k) => _deserialize_value(v) for (k, v) in raw)
+    m = ProphetModel(
+        growth=d["growth"],
+        model_backend=Symbol(d["model_backend"]),
+        n_changepoints=Int(d["n_changepoints"]),
+        changepoint_range=Float64(d["changepoint_range"]),
+        yearly_seasonality=d["yearly_seasonality"],
+        weekly_seasonality=d["weekly_seasonality"],
+        daily_seasonality=d["daily_seasonality"],
+        holidays=d["holidays"],
+        country_holidays=d["country_holidays"],
+        seasonality_mode=d["seasonality_mode"],
+        holidays_mode=d["holidays_mode"],
+        seasonality_prior_scale=Float64(d["seasonality_prior_scale"]),
+        holidays_prior_scale=Float64(d["holidays_prior_scale"]),
+        changepoint_prior_scale=Float64(d["changepoint_prior_scale"]),
+        mcmc_samples=Int(d["mcmc_samples"]),
+        interval_width=Float64(d["interval_width"]),
+        uncertainty_samples=Int(d["uncertainty_samples"]),
+    )
+    m.logistic_floor = Bool(d["logistic_floor"])
+    m.history = d["history"]
+    m.history_dates = isnothing(d["history_dates"]) ? nothing : Date.(d["history_dates"])
+    m.start = isnothing(d["start"]) ? nothing : Date(d["start"])
+    m.y_min = isnothing(d["y_min"]) ? nothing : Float64(d["y_min"])
+    m.y_scale = isnothing(d["y_scale"]) ? nothing : Float64(d["y_scale"])
+    m.t_scale = d["t_scale"]
+    m.params = Dict{String,Any}(String(k) => v for (k, v) in d["params"])
+    m.fit_backend = isnothing(d["fit_backend"]) ? nothing : Symbol(d["fit_backend"])
+    m.fit_engine = isnothing(d["fit_engine"]) ? nothing : Symbol(d["fit_engine"])
+    m.backend_data = Dict{String,Any}(String(k) => v for (k, v) in d["backend_data"])
+    m.seasonalities = Dict{String,Dict{String,Any}}(
+        String(k) => Dict{String,Any}(String(kk) => vv for (kk, vv) in v) for (k, v) in d["seasonalities"]
+    )
+    m.extra_regressors = Dict{String,Dict{String,Any}}(
+        String(k) => Dict{String,Any}(String(kk) => vv for (kk, vv) in v) for (k, v) in d["extra_regressors"]
+    )
+    m.train_holiday_names = isnothing(d["train_holiday_names"]) ? nothing : String.(d["train_holiday_names"])
+    m.changepoints_t = isnothing(d["changepoints_t"]) ? nothing : Float64.(d["changepoints_t"])
+    return m
+end
+
+model_from_json(model_json::AbstractString) = model_from_dict(JSON.parse(model_json))

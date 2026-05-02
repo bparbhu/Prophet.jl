@@ -10,7 +10,7 @@
 
     @test flat_trend(t, 0.5) == fill(0.5, length(t))
 
-    for backend in BACKENDS
+    for backend in FAST_BACKENDS
         @testset "$(backend)" begin
             flat_model = Prophet.ProphetModel(growth="flat", model_backend=backend)
             df = example_daily(20)

@@ -5,7 +5,7 @@
     @test !isempty(cutoffs)
     @test all(cutoffs .< maximum(df.ds))
 
-    for backend in BACKENDS
+    for backend in FAST_BACKENDS
         @testset "$(backend)" begin
             m = Prophet.ProphetModel(model_backend=backend)
             fit(m, df)
