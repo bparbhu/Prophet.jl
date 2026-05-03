@@ -526,9 +526,19 @@ function _write_json(path::AbstractString, data::Dict{String,Any})
     return path
 end
 
+function _stan_json_value(value)
+    if value isa AbstractMatrix
+        return [collect(row) for row in eachrow(value)]
+    elseif value isa AbstractVector
+        return collect(value)
+    else
+        return value
+    end
+end
+
 function _stan_data(data::Dict{String,Any})
     return Dict{String,Any}(
-        key => value for (key, value) in data if key != "feature_names"
+        key => _stan_json_value(value) for (key, value) in data if key != "feature_names"
     )
 end
 
