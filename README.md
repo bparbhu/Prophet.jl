@@ -102,6 +102,33 @@ It fits the same synthetic daily series with `:stan`, `:turing`, and
 `:neural_turing`, then prints a small forecast summary and side-by-side backend
 preview.
 
+There are also standalone examples for each backend:
+
+```bash
+julia --project=. examples/stan_backend.jl
+julia --project=. examples/turing_backend.jl
+julia --project=. examples/neural_turing_backend.jl
+```
+
+Each standalone example exposes a reusable runner:
+
+```julia
+include("examples/stan_backend.jl")
+model, forecast, summary = run_stan_backend_example()
+
+include("examples/turing_backend.jl")
+model, forecast, summary = run_turing_backend_example()
+
+include("examples/neural_turing_backend.jl")
+model, forecast, summary = run_neural_turing_backend_example()
+```
+
+Pluto notebook versions are available in `examples/pluto/`:
+
+- `examples/pluto/stan_backend.jl`
+- `examples/pluto/turing_backend.jl`
+- `examples/pluto/neural_turing_backend.jl`
+
 ## Holidays
 
 Python Prophet depends on the Python `holidays` package. For this POC, the package reads the generated CSV directly:
