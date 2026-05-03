@@ -24,7 +24,7 @@ function get_changepoint_matrix(t, t_change, T::Integer=length(t), S::Integer=le
 end
 
 function logistic_gamma(k::Real, m::Real, delta, t_change, S::Integer=length(t_change))
-    gamma = zeros(Float64, S)
+    gamma = similar(delta, S)
     k_s = vcat(k, k .+ cumsum(delta))
     m_pr = m
     for i in 1:S
@@ -43,7 +43,7 @@ function linear_trend(k::Real, m::Real, delta, t, A, t_change)
     return (k .+ A * delta) .* t .+ (m .+ A * (-t_change .* delta))
 end
 
-flat_trend(m::Real, T::Integer) = fill(float(m), T)
+flat_trend(m::Real, T::Integer) = fill(m, T)
 
 function prophet_trend_from_A(k, m, delta, t, cap, A, t_change, trend_indicator)
     T = length(t)
@@ -90,7 +90,11 @@ multiplicative regressor likelihood.
 @model function prophet(T, K, t, cap, y, S, t_change, X, sigmas, tau, trend_indicator, s_a, s_m)
     k ~ Normal(0, 5)
     m ~ Normal(0, 5)
-    delta ~ filldist(Laplace(0, tau), S)
+    if S > 0
+        delta ~ filldist(Laplace(0, tau), S)
+    else
+        delta = zeros(typeof(k), 0)
+    end
     sigma_obs ~ truncated(Normal(0, 0.5); lower=0)
     beta ~ MvNormal(zeros(K), Diagonal(sigmas .^ 2))
 
@@ -116,7 +120,11 @@ changepoint matrices. Use the `y`-accepting wrapper to condition observations.
 
     k ~ Normal(0, 5)
     m ~ Normal(0, 5)
-    delta ~ filldist(Laplace(0, tau), S)
+    if S > 0
+        delta ~ filldist(Laplace(0, tau), S)
+    else
+        delta = zeros(typeof(k), 0)
+    end
     sigma_obs ~ truncated(Normal(0, 0.5); lower=0)
     beta ~ MvNormal(zeros(K), Diagonal(sigmas .^ 2))
 

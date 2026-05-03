@@ -429,6 +429,7 @@ function _changepoints_t(m::ProphetModel, history::DataFrame)
     end
     hist_size = max(1, floor(Int, nrow(history) * m.changepoint_range))
     n_changepoints = min(m.n_changepoints, max(hist_size - 1, 0))
+    m.n_changepoints = n_changepoints
     n_changepoints == 0 && return Float64[]
     indexes = unique(round.(Int, range(1, hist_size, length=n_changepoints + 1)))[2:end]
     return Float64.(history.t[indexes])
@@ -525,6 +526,12 @@ function _write_json(path::AbstractString, data::Dict{String,Any})
     return path
 end
 
+function _stan_data(data::Dict{String,Any})
+    return Dict{String,Any}(
+        key => value for (key, value) in data if key != "feature_names"
+    )
+end
+
 function _cmdstan_executable()
     exe = joinpath(mktempdir(), "prophet_model")
     run(`make -C $(cmdstan_home()) $(exe) STANCFLAGS=--O1`)
@@ -563,7 +570,7 @@ function _stan_fit!(m::ProphetModel, history::DataFrame)
     data = _backend_training_data(m, history)
     kinit, minit = _initial_params(m, history)
     workdir = mktempdir()
-    data_file = _write_json(joinpath(workdir, "data.json"), data)
+    data_file = _write_json(joinpath(workdir, "data.json"), _stan_data(data))
     init_file = _write_json(
         joinpath(workdir, "init.json"),
         Dict{String,Any}(
@@ -1235,7 +1242,7 @@ function _sample_uncertainty(m::ProphetModel, df::DataFrame, n_samples::Integer,
     changepoints = m.changepoints_t === nothing ? Float64[] : m.changepoints_t
     likelihood = length(changepoints) * single_diff
     deltas = Float64.(get(m.params, "delta", zeros(length(changepoints))))
-    mean_delta = mean(abs.(deltas)) + 1e-8
+    mean_delta = isempty(deltas) ? 1e-8 : mean(abs.(deltas)) + 1e-8
     future_uncertainty = if m.growth == "flat"
         zeros(Int(n_samples), n_length)
     elseif m.growth == "logistic"

@@ -12,7 +12,7 @@ function backend_comparison_daily(n::Int=120)
     return DataFrame(ds=collect(ds), y=Float64.(y))
 end
 
-function fit_backend(df::DataFrame, backend::Symbol; periods::Int=30)
+function fit_backend_example(df::DataFrame, backend::Symbol; periods::Int=30)
     model = Prophet.ProphetModel(model_backend=backend, uncertainty_samples=100)
     Prophet.add_country_holidays(model; country_name="US")
     Prophet.add_seasonality(model; name="monthly", period=30.5, fourier_order=5)
@@ -30,7 +30,7 @@ function compare_backends(; periods::Int=30, backends=(:stan, :turing, :neural_t
     forecasts = DataFrame[]
 
     for backend in backends
-        model, forecast = fit_backend(df, backend; periods=periods)
+        model, forecast = fit_backend_example(df, backend; periods=periods)
         fitted[backend] = model
         push!(forecasts, forecast)
     end

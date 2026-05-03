@@ -49,7 +49,11 @@ additional Bayesian neural-network term is an additive residual component.
 
     k ~ Normal(0, 5)
     m ~ Normal(0, 5)
-    delta ~ filldist(Laplace(0, tau), S)
+    if S > 0
+        delta ~ filldist(Laplace(0, tau), S)
+    else
+        delta = zeros(typeof(k), 0)
+    end
     sigma_obs ~ truncated(Normal(0, 0.5); lower=0)
     beta ~ MvNormal(zeros(K), Diagonal(sigmas .^ 2))
 
@@ -76,7 +80,11 @@ end
 
     k ~ Normal(0, 5)
     m ~ Normal(0, 5)
-    delta ~ filldist(Laplace(0, tau), S)
+    if S > 0
+        delta ~ filldist(Laplace(0, tau), S)
+    else
+        delta = zeros(typeof(k), 0)
+    end
     sigma_obs ~ truncated(Normal(0, 0.5); lower=0)
     beta ~ MvNormal(zeros(K), Diagonal(sigmas .^ 2))
 
