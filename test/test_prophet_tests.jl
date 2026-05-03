@@ -1,4 +1,60 @@
 @testset "Python test_prophet.py parity by backend" begin
+    @testset "forecaster.py method surface" begin
+        python_forecaster_methods = [
+            "_load_stan_backend",
+            "validate_inputs",
+            "validate_column_name",
+            "setup_dataframe",
+            "initialize_scales",
+            "set_changepoints",
+            "fourier_series",
+            "make_seasonality_features",
+            "construct_holiday_dataframe",
+            "make_holiday_features",
+            "add_regressor",
+            "add_seasonality",
+            "add_country_holidays",
+            "make_all_seasonality_features",
+            "regressor_column_matrix",
+            "add_group_component",
+            "parse_seasonality_args",
+            "set_auto_seasonalities",
+            "linear_growth_init",
+            "logistic_growth_init",
+            "flat_growth_init",
+            "preprocess",
+            "calculate_initial_params",
+            "fit",
+            "predict",
+            "piecewise_linear",
+            "piecewise_logistic",
+            "flat_trend",
+            "predict_trend",
+            "predict_seasonal_components",
+            "predict_uncertainty",
+            "sample_posterior_predictive",
+            "sample_model",
+            "sample_model_vectorized",
+            "sample_predictive_trend",
+            "sample_predictive_trend_vectorized",
+            "_sample_uncertainty",
+            "_make_trend_shift_matrix",
+            "_make_historical_mat_time",
+            "_logistic_uncertainty",
+            "predictive_samples",
+            "percentile",
+            "make_future_dataframe",
+            "plot",
+            "plot_components",
+        ]
+        @test all(isdefined(Prophet, Symbol(name)) for name in python_forecaster_methods)
+
+        m = Prophet.ProphetModel()
+        @test add_regressor(m, "promo") === m
+        @test add_seasonality(m, "monthly", 30.5, 3) === m
+        @test add_country_holidays(Prophet.ProphetModel(), "US") isa Prophet.ProphetModel
+    end
+
     @testset "fit/predict edge cases" begin
         for backend in FAST_BACKENDS
             @testset "$(backend)" begin

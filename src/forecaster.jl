@@ -1,8 +1,11 @@
 using CSV
 using DataFrames
 using Dates
+using Distributions
+using JSON
 using LinearAlgebra
 using Statistics
+import Stan
 using Turing
 
 mutable struct ProphetModel
@@ -199,6 +202,15 @@ end
 function fit_engine(m::ProphetModel)
     return m.fit_engine
 end
+
+function _load_stan_backend(m::ProphetModel, stan_backend=nothing)
+    m.history !== nothing && error("Stan backend must be selected before fitting.")
+    m.model_backend = :stan
+    return stan_backend === nothing ? stan_backend_module() : stan_backend
+end
+
+_load_stan_backend(stan_backend=nothing) =
+    stan_backend === nothing ? stan_backend_module() : stan_backend
 
 function _seasonality_design_matrix(m::ProphetModel, history::DataFrame)
     feature_frames = DataFrame[]
@@ -399,6 +411,11 @@ function set_auto_seasonalities!(m::ProphetModel, history::DataFrame)
     return m
 end
 
+function set_auto_seasonalities(m::ProphetModel)
+    m.history === nothing && error("Model history must be set before seasonalities.")
+    return set_auto_seasonalities!(m, m.history)
+end
+
 function _changepoints_t(m::ProphetModel, history::DataFrame)
     if m.specified_changepoints
         cps = something(m.changepoints, Date[])
@@ -502,8 +519,9 @@ function _json_value(x)
 end
 
 function _write_json(path::AbstractString, data::Dict{String,Any})
-    pairs = ["\"" * key * "\":" * _json_value(value) for (key, value) in data]
-    write(path, "{" * join(pairs, ",") * "}")
+    open(path, "w") do io
+        JSON.print(io, data)
+    end
     return path
 end
 
@@ -633,6 +651,12 @@ end
 add_country_holidays(m::ProphetModel; country_name::AbstractString) =
     add_country_holidays!(m; country_name=country_name)
 
+add_country_holidays!(m::ProphetModel, country_name::AbstractString) =
+    add_country_holidays!(m; country_name=country_name)
+
+add_country_holidays(m::ProphetModel, country_name::AbstractString) =
+    add_country_holidays!(m; country_name=country_name)
+
 function add_seasonality!(
     m::ProphetModel;
     name::AbstractString,
@@ -663,6 +687,32 @@ end
 
 add_seasonality(m::ProphetModel; kwargs...) = add_seasonality!(m; kwargs...)
 
+add_seasonality!(
+    m::ProphetModel,
+    name::AbstractString,
+    period::Real,
+    fourier_order::Integer;
+    prior_scale::Union{Nothing,Real}=nothing,
+    mode::Union{Nothing,AbstractString}=nothing,
+    condition_name::Union{Nothing,AbstractString}=nothing,
+) = add_seasonality!(
+    m;
+    name=name,
+    period=period,
+    fourier_order=fourier_order,
+    prior_scale=prior_scale,
+    mode=mode,
+    condition_name=condition_name,
+)
+
+add_seasonality(
+    m::ProphetModel,
+    name::AbstractString,
+    period::Real,
+    fourier_order::Integer;
+    kwargs...
+) = add_seasonality!(m, name, period, fourier_order; kwargs...)
+
 function add_regressor!(
     m::ProphetModel;
     name::AbstractString,
@@ -688,6 +738,23 @@ end
 
 add_regressor(m::ProphetModel; kwargs...) = add_regressor!(m; kwargs...)
 
+add_regressor!(
+    m::ProphetModel,
+    name::AbstractString;
+    prior_scale::Union{Nothing,Real}=nothing,
+    standardize::Union{String,Bool}="auto",
+    mode::Union{Nothing,AbstractString}=nothing,
+) = add_regressor!(
+    m;
+    name=name,
+    prior_scale=prior_scale,
+    standardize=standardize,
+    mode=mode,
+)
+
+add_regressor(m::ProphetModel, name::AbstractString; kwargs...) =
+    add_regressor!(m, name; kwargs...)
+
 function _coerce_history(df::DataFrame)
     ("ds" in names(df) && "y" in names(df)) || error("DataFrame must contain `ds` and `y` columns.")
     out = copy(df)
@@ -710,16 +777,30 @@ function initialize_scales!(m::ProphetModel, df::DataFrame)
         floor = zeros(nrow(df))
     end
     if m.scaling == "minmax"
-        m.y_min = minimum(Float64.(df.y) .- floor)
-        m.y_scale = maximum(Float64.(df.y) .- floor) - m.y_min
+        if m.growth == "logistic" && "cap" in names(df)
+            m.y_min = minimum(floor)
+            m.y_scale = maximum(Float64.(df.cap)) - m.y_min
+        else
+            m.y_min = minimum(Float64.(df.y))
+            m.y_scale = maximum(Float64.(df.y)) - m.y_min
+        end
     else
-        m.y_min = 0.0
+        if m.growth == "logistic" && "floor" in names(df)
+            m.y_min = minimum(abs.(Float64.(df.y) .- floor))
+        else
+            m.y_min = 0.0
+        end
         m.y_scale = maximum(abs.(Float64.(df.y) .- floor))
     end
     m.y_scale == 0 && (m.y_scale = 1.0)
     m.start = minimum(Date.(df.ds))
     m.t_scale = maximum(Date.(df.ds)) - m.start
     Dates.value(m.t_scale) == 0 && (m.t_scale = Day(1))
+    return m
+end
+
+function initialize_scales(m::ProphetModel, initialize::Bool, df::DataFrame)
+    initialize && initialize_scales!(m, df)
     return m
 end
 
@@ -771,7 +852,8 @@ function setup_dataframe(m::ProphetModel, df::DataFrame; initialize_scales::Bool
     if m.logistic_floor
         "floor" in names(out) || error("Expected column floor.")
     elseif !("floor" in names(out))
-        out.floor = zeros(nrow(out))
+        floor_value = m.scaling == "minmax" ? Float64(m.y_min) : 0.0
+        out.floor = fill(floor_value, nrow(out))
     end
 
     if m.growth == "logistic"
@@ -782,28 +864,30 @@ function setup_dataframe(m::ProphetModel, df::DataFrame; initialize_scales::Bool
 
     out.t = Float64.(Dates.value.(out.ds .- m.start)) ./ Dates.value(m.t_scale)
     if "y" in names(out)
-        out.y_scaled = (Float64.(out.y) .- Float64.(out.floor) .- m.y_min) ./ m.y_scale
+        out.y_scaled = (Float64.(out.y) .- Float64.(out.floor)) ./ m.y_scale
     end
     return out
 end
 
-function preprocess(m::ProphetModel, df::DataFrame)
+function preprocess(m::ProphetModel, df::DataFrame; kwargs...)
+    "ds" in names(df) && "y" in names(df) ||
+        error("DataFrame must contain `ds` and `y` columns.")
     history = _coerce_history(df)
     nrow(history) >= 2 || error("DataFrame must contain at least two observations.")
+    m.history_dates = sort(unique(Date.(df.ds)))
     history = setup_dataframe(m, history; initialize_scales=true)
+    m.fit_kwargs = Dict{String,Any}(String(k) => v for (k, v) in kwargs)
     set_auto_seasonalities!(m, history)
-    return model_input_data(_backend_training_data(m, history))
+    m.history = history
+    data = _backend_training_data(m, history)
+    m.backend_data = data
+    return model_input_data(data)
 end
 
 function fit(m::ProphetModel, df::DataFrame; kwargs...)
     m.history !== nothing && error("Prophet object can only be fit once. Instantiate a new object.")
-    "ds" in names(df) || error("DataFrame must contain `ds` and `y` columns.")
-    m.history_dates = sort(unique(Date.(df.ds)))
-    history = _coerce_history(df)
-    nrow(history) >= 2 || error("DataFrame must contain at least two observations.")
-    history = setup_dataframe(m, history; initialize_scales=true)
-    m.fit_kwargs = Dict{String,Any}(String(k) => v for (k, v) in kwargs)
-    set_auto_seasonalities!(m, history)
+    preprocess(m, df; kwargs...)
+    history = m.history
     if m.model_backend == :stan
         _stan_fit!(m, history)
     elseif m.model_backend == :turing
@@ -813,7 +897,6 @@ function fit(m::ProphetModel, df::DataFrame; kwargs...)
     else
         error("Unsupported model backend $(m.model_backend).")
     end
-    m.history = history
     return m
 end
 
@@ -964,7 +1047,7 @@ function make_holiday_features(m::ProphetModel, dates, holidays::DataFrame)
     return features, prior_scale_list, holiday_names
 end
 
-function predict(m::ProphetModel, df::Union{Nothing,DataFrame}=nothing)
+function predict(m::ProphetModel, df::Union{Nothing,DataFrame}=nothing; vectorized::Bool=true)
     m.history === nothing && error("Model has not been fit.")
     if df === nothing
         cols = [:ds]
@@ -990,7 +1073,7 @@ function predict(m::ProphetModel, df::Union{Nothing,DataFrame}=nothing)
         piecewise_linear(t, deltas, m.params["k"], m.params["m"], changepoints)
     end
     floor = "floor" in names(future) ? Float64.(future.floor) : zeros(nrow(future))
-    trend = trend_scaled .* m.y_scale .+ floor .+ m.y_min
+    trend = trend_scaled .* m.y_scale .+ floor
 
     seasonal_features, _, component_cols, _ = make_all_seasonality_features(m, future)
     X = Matrix{Float64}(seasonal_features)
@@ -1000,7 +1083,7 @@ function predict(m::ProphetModel, df::Union{Nothing,DataFrame}=nothing)
     length(beta) == size(X, 2) || (beta = zeros(size(X, 2)))
     additive_scaled = X * (beta .* s_a)
     multiplicative = X * (beta .* s_m)
-    yhat = (trend_scaled .* (1 .+ multiplicative) .+ additive_scaled) .* m.y_scale .+ floor .+ m.y_min
+    yhat = (trend_scaled .* (1 .+ multiplicative) .+ additive_scaled) .* m.y_scale .+ floor
     out = DataFrame(ds=future.ds, trend=trend, yhat=yhat)
 
     if m.uncertainty_samples > 0
@@ -1031,7 +1114,7 @@ function predict_trend(m::ProphetModel, df::DataFrame)
     else
         piecewise_linear(t, deltas, m.params["k"], m.params["m"], changepoints)
     end
-    return trend_scaled .* m.y_scale .+ prepared.floor .+ m.y_min
+    return trend_scaled .* m.y_scale .+ prepared.floor
 end
 
 function predict_seasonal_components(m::ProphetModel, df::DataFrame)
@@ -1059,30 +1142,263 @@ function predict_uncertainty(m::ProphetModel, df::DataFrame; vectorized::Bool=tr
     return fcst[:, keep]
 end
 
-function predictive_samples(m::ProphetModel, df::DataFrame; vectorized::Bool=true)
-    fcst = predict(m, df)
-    return Dict("yhat" => fcst.yhat, "trend" => fcst.trend)
+function _make_trend_shift_matrix(mean_delta::Real, likelihood::Real, future_length::Integer; n_samples::Integer)
+    future_length <= 0 && return zeros(Int(n_samples), 0)
+    hits = rand(Int(n_samples), Int(future_length)) .< Float64(likelihood)
+    shifts = rand(Laplace(0.0, Float64(mean_delta)), Int(n_samples), Int(future_length))
+    mat = shifts .* hits
+    previous = hcat(zeros(Int(n_samples)), mat)[:, 1:Int(future_length)]
+    return (previous .+ mat) ./ 2
 end
 
-sample_posterior_predictive(m::ProphetModel, df::DataFrame, vectorized::Bool=true) =
-    predictive_samples(m, df; vectorized=vectorized)
+function _make_historical_mat_time(deltas, changepoints_t, t_time; n_row::Integer=1, single_diff=nothing)
+    t_vec = Float64.(t_time)
+    diff_value = single_diff === nothing ? mean(diff(t_vec)) : Float64(single_diff)
+    (!isfinite(diff_value) || diff_value <= 0) && (diff_value = 1.0)
+    prev_time = collect(0.0:diff_value:(1.0 + diff_value))
+    prev_deltas = zeros(length(prev_time))
+    for (delta, changepoint) in zip(Float64.(deltas), Float64.(changepoints_t))
+        idx = findfirst(x -> x > changepoint, prev_time)
+        idx !== nothing && (prev_deltas[idx] = delta)
+    end
+    return repeat(reshape(prev_deltas, 1, :), Int(n_row), 1), prev_time
+end
 
-sample_model(m::ProphetModel, df::DataFrame, args...) = predictive_samples(m, df)
+function _logistic_uncertainty(
+    m::ProphetModel;
+    mat,
+    deltas,
+    k,
+    intercept,
+    cap,
+    t_time,
+    n_length::Integer,
+    single_diff=nothing,
+)
+    n_samples = size(mat, 1)
+    n_length <= 0 && return zeros(n_samples, 0)
+    t_vec = Float64.(t_time)
+    cap_vec = Float64.(cap)
+    diff_value = single_diff === nothing ? mean(diff(t_vec)) : Float64(single_diff)
+    historical_mat, historical_time = _make_historical_mat_time(
+        deltas,
+        m.changepoints_t === nothing ? Float64[] : m.changepoints_t,
+        t_vec;
+        n_row=n_samples,
+        single_diff=diff_value,
+    )
+    all_shifts = hcat(historical_mat, mat)
+    full_time = vcat(historical_time, t_vec)
+    rates = cumsum(all_shifts, dims=2) .+ Float64(k)
+    offsets = fill(Float64(intercept), size(rates))
+    trends = zeros(n_samples, Int(n_length))
+    start_col = size(rates, 2) - Int(n_length) + 1
+    for row in 1:n_samples
+        for j in 1:Int(n_length)
+            col = start_col + j - 1
+            rate = rates[row, col]
+            offset = offsets[row, col]
+            trends[row, j] = cap_vec[j] / (1 + exp(-rate * (full_time[col] - offset)))
+        end
+    end
+    return trends .- mean(trends, dims=1)
+end
 
-sample_model_vectorized(m::ProphetModel, df::DataFrame, args...) = predictive_samples(m, df)
+function _parameter_at(value, iteration::Integer)
+    if value isa AbstractMatrix
+        return value[min(iteration, size(value, 1)), :]
+    elseif value isa AbstractVector
+        return value
+    else
+        return value
+    end
+end
 
-sample_predictive_trend(m::ProphetModel, df::DataFrame, args...) = predict_trend(m, df)
+function _parameter_scalar_at(value, iteration::Integer)
+    if value isa AbstractVector
+        return Float64(value[min(iteration, length(value))])
+    else
+        return Float64(value)
+    end
+end
 
-sample_predictive_trend_vectorized(m::ProphetModel, df::DataFrame, n_samples::Integer, args...) =
-    repeat(reshape(predict_trend(m, df), 1, :), n_samples, 1)
+function _sample_uncertainty(m::ProphetModel, df::DataFrame, n_samples::Integer, iteration::Integer=1)
+    prepared = "t" in names(df) ? df : setup_dataframe(m, copy(df))
+    t = Float64.(prepared.t)
+    if maximum(t) <= 1
+        return zeros(Int(n_samples), nrow(prepared))
+    end
+    future = prepared[t .> 1, :]
+    n_length = nrow(future)
+    single_diff = n_length > 1 ? mean(diff(Float64.(future.t))) :
+        (m.history === nothing ? 1.0 : mean(diff(Float64.(m.history.t))))
+    changepoints = m.changepoints_t === nothing ? Float64[] : m.changepoints_t
+    likelihood = length(changepoints) * single_diff
+    deltas = Float64.(get(m.params, "delta", zeros(length(changepoints))))
+    mean_delta = mean(abs.(deltas)) + 1e-8
+    future_uncertainty = if m.growth == "flat"
+        zeros(Int(n_samples), n_length)
+    elseif m.growth == "logistic"
+        mat = _make_trend_shift_matrix(mean_delta, likelihood, n_length; n_samples=n_samples)
+        _logistic_uncertainty(
+            m;
+            mat=mat,
+            deltas=deltas,
+            k=m.params["k"],
+            intercept=m.params["m"],
+            cap=future.cap_scaled,
+            t_time=future.t,
+            n_length=n_length,
+            single_diff=single_diff,
+        )
+    else
+        mat = _make_trend_shift_matrix(mean_delta, likelihood, n_length; n_samples=n_samples)
+        cumsum(cumsum(mat, dims=2), dims=2) .* single_diff
+    end
+    if minimum(t) <= 1
+        return hcat(zeros(Int(n_samples), count(<=(1), t)), future_uncertainty)
+    end
+    return future_uncertainty
+end
 
-function percentile(a; dims=:, p=50)
+function sample_predictive_trend(m::ProphetModel, df::DataFrame, iteration::Integer=1)
+    prepared = "t" in names(df) ? df : setup_dataframe(m, copy(df))
+    t = Float64.(prepared.t)
+    changepoints = m.changepoints_t === nothing ? Float64[] : m.changepoints_t
+    deltas = Float64.(_parameter_at(get(m.params, "delta", zeros(length(changepoints))), iteration))
+    k = _parameter_scalar_at(m.params["k"], iteration)
+    intercept = _parameter_scalar_at(m.params["m"], iteration)
+    trend_scaled = if m.growth == "flat"
+        flat_trend(t, intercept)
+    elseif m.growth == "logistic"
+        piecewise_logistic(t, prepared.cap_scaled, deltas, k, intercept, changepoints)
+    else
+        piecewise_linear(t, deltas, k, intercept, changepoints)
+    end
+    return trend_scaled .* m.y_scale .+ prepared.floor
+end
+
+function sample_predictive_trend_vectorized(
+    m::ProphetModel,
+    df::DataFrame,
+    n_samples::Integer,
+    iteration::Integer=1,
+)
+    prepared = "t" in names(df) ? df : setup_dataframe(m, copy(df))
+    expected = sample_predictive_trend(m, prepared, iteration)
+    uncertainty = _sample_uncertainty(m, prepared, n_samples, iteration) .* m.y_scale
+    return repeat(reshape(expected, 1, :), Int(n_samples), 1) .+ uncertainty
+end
+
+function sample_model(
+    m::ProphetModel,
+    df::DataFrame,
+    seasonal_features::DataFrame,
+    iteration::Integer,
+    s_a,
+    s_m,
+)
+    prepared = "t" in names(df) ? df : setup_dataframe(m, copy(df))
+    trend = sample_predictive_trend(m, prepared, iteration)
+    beta = Float64.(_parameter_at(get(m.params, "beta", zeros(ncol(seasonal_features))), iteration))
+    length(beta) == ncol(seasonal_features) || (beta = zeros(ncol(seasonal_features)))
+    X = Matrix{Float64}(seasonal_features)
+    Xb_a = X * (beta .* Float64.(s_a)) .* m.y_scale
+    Xb_m = X * (beta .* Float64.(s_m))
+    sigma = _parameter_scalar_at(get(m.params, "sigma_obs", 0.0), iteration)
+    noise = sigma > 0 ? rand(Normal(0.0, sigma), nrow(prepared)) .* m.y_scale : zeros(nrow(prepared))
+    return Dict("yhat" => trend .* (1 .+ Xb_m) .+ Xb_a .+ noise, "trend" => trend)
+end
+
+function sample_model_vectorized(
+    m::ProphetModel,
+    df::DataFrame,
+    seasonal_features::DataFrame,
+    iteration::Integer,
+    s_a,
+    s_m,
+    n_samples::Integer,
+)
+    prepared = "t" in names(df) ? df : setup_dataframe(m, copy(df))
+    beta = Float64.(_parameter_at(get(m.params, "beta", zeros(ncol(seasonal_features))), iteration))
+    length(beta) == ncol(seasonal_features) || (beta = zeros(ncol(seasonal_features)))
+    X = Matrix{Float64}(seasonal_features)
+    Xb_a = X * (beta .* Float64.(s_a)) .* m.y_scale
+    Xb_m = X * (beta .* Float64.(s_m))
+    trends = sample_predictive_trend_vectorized(m, prepared, n_samples, iteration)
+    sigma = _parameter_scalar_at(get(m.params, "sigma_obs", 0.0), iteration)
+    noise = sigma > 0 ? rand(Normal(0.0, sigma), size(trends)) .* m.y_scale : zeros(size(trends))
+    return [
+        Dict("yhat" => trends[i, :] .* (1 .+ Xb_m) .+ Xb_a .+ noise[i, :], "trend" => trends[i, :])
+        for i in 1:Int(n_samples)
+    ]
+end
+
+function sample_posterior_predictive(m::ProphetModel, df::DataFrame, vectorized::Bool=true)
+    prepared = "t" in names(df) ? df : setup_dataframe(m, copy(df))
+    seasonal_features, _, component_cols, _ = make_all_seasonality_features(m, prepared)
+    n_iterations = 1
+    k_param = get(m.params, "k", [0.0])
+    k_param isa AbstractVector && (n_iterations = max(1, length(k_param)))
+    samples_per_iteration = max(1, ceil(Int, m.uncertainty_samples / n_iterations))
+    values = Dict("yhat" => Vector{Vector{Float64}}(), "trend" => Vector{Vector{Float64}}())
+    for iteration in 1:n_iterations
+        sims = if vectorized
+            sample_model_vectorized(
+                m,
+                prepared,
+                seasonal_features,
+                iteration,
+                component_cols[!, :additive_terms],
+                component_cols[!, :multiplicative_terms],
+                samples_per_iteration,
+            )
+        else
+            [
+                sample_model(
+                    m,
+                    prepared,
+                    seasonal_features,
+                    iteration,
+                    component_cols[!, :additive_terms],
+                    component_cols[!, :multiplicative_terms],
+                )
+                for _ in 1:samples_per_iteration
+            ]
+        end
+        for sim in sims
+            push!(values["yhat"], Float64.(sim["yhat"]))
+            push!(values["trend"], Float64.(sim["trend"]))
+        end
+    end
+    return Dict(key => hcat(series...) for (key, series) in values)
+end
+
+function predictive_samples(m::ProphetModel, df::DataFrame; vectorized::Bool=true)
+    prepared = setup_dataframe(m, copy(df))
+    return sample_posterior_predictive(m, prepared, vectorized)
+end
+
+function percentile(a, p=50; dims=:)
     q = p > 1 ? p / 100 : p
     return mapslices(x -> quantile(collect(skipmissing(x)), q), a; dims=dims)
 end
 
-function make_future_dataframe(m::ProphetModel; periods::Integer, freq::Period=Day(1), include_history::Bool=true)
+percentile(m::ProphetModel, a, p=50; dims=:) = percentile(a, p; dims=dims)
+
+function make_future_dataframe(
+    m::ProphetModel;
+    periods::Integer,
+    freq::Union{Nothing,Period}=Day(1),
+    include_history::Bool=true,
+)
     m.history === nothing && error("Model has not been fit.")
+    if freq === nothing
+        sorted_dates = sort(m.history_dates)
+        diffs = diff(sorted_dates)
+        freq = isempty(diffs) ? Day(1) : last(diffs)
+        Dates.value(freq) == 0 && error("Unable to infer `freq`.")
+    end
     last_date = maximum(m.history.ds)
     future_dates = [last_date + i * freq for i in 1:periods]
     dates = include_history ? vcat(m.history_dates, future_dates) : future_dates
