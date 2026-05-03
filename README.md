@@ -2,7 +2,8 @@
 
 A Julia proof of concept for Prophet-style forecasting components.
 
-This branch keeps the package runtime focused on Julia code:
+This package is a Julia proof of concept for Prophet-style forecasting with a
+Python Prophet-like public API:
 
 - Stan-equivalent trend and likelihood utilities in `src/turing/prophet-turing.jl`.
 - `Stan.jl` dependency and bundled Stan model access through `stan_model_file()`.
@@ -37,10 +38,14 @@ m_turing = Prophet.ProphetModel(model_backend=:turing)
 m_neural = Prophet.ProphetModel(model_backend=:neural_turing) # also accepts :flux_turing
 ```
 
-The POC currently carries the backend choice through the public API while the
-deterministic fit/predict facade remains lightweight for CI. The exported
-`prophet` and `neural_prophet` Turing models are tested directly for their model
-math.
+`fit` routes through the selected backend:
+
+- `:stan` uses the bundled Stan model through CmdStan.
+- `:turing` uses the Stan-equivalent Turing model.
+- `:neural_turing` keeps the Prophet terms and adds the Flux/Turing Bayesian neural residual.
+
+The exported `prophet` and `neural_prophet` Turing models are tested directly
+against the Stan-equivalent model math.
 
 If you prefer exported names:
 
@@ -95,10 +100,7 @@ julia --project=. examples/backend_comparison.jl
 
 It fits the same synthetic daily series with `:stan`, `:turing`, and
 `:neural_turing`, then prints a small forecast summary and side-by-side backend
-preview. In the current POC the public fit/predict facade is deterministic, so
-the example is primarily an API comparison scaffold; as the backend-specific
-fit paths mature, this script becomes the place to inspect behavioral
-differences.
+preview.
 
 ## Holidays
 
@@ -142,3 +144,9 @@ julia --project=. -e 'using Pkg; Pkg.test()'
 GitHub Actions tests Julia `1.10` and the latest stable Julia release. CI also
 downloads and builds CmdStan `2.37.0`, sets both `CMDSTAN` and
 `JULIA_CMDSTAN_HOME`, and verifies the `stanc` version during the test run.
+
+The test suite is organized under Julia's standard `test/` directory and
+includes parity-oriented coverage inspired by Python Prophet's `test_prophet`,
+`test_diagnostics`, `test_serialize`, `test_utilities`, and model tests. The
+backend-facing tests exercise `:stan`, `:turing`, and `:neural_turing` where the
+runtime cost is appropriate for CI.
